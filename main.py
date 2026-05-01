@@ -85,7 +85,7 @@ def format_time(date_str):
 
 async def scan_logic(from_city=None, to_city=None):
     results = []
-    allowed = ["weapon", "armor", "plate", "leather", "cloth", "bag", "cape", "potion", "meal", "mount", "relic", "artefact", "tool"]
+    allowed = ["weapon", "armor", "plate", "leather", "cloth", "bag", "cape", "potion", "meal", "mount", "relic", "artefact", "tool", "shapeshifter"]
     item_list = [k for k in items_data.keys() if k.startswith(("T4_", "T5_", "T6_", "T7_", "T8_")) and any(x in k.lower() for x in allowed)]
     
     search_cities = [from_city, to_city] if from_city and to_city else CITIES
@@ -115,9 +115,11 @@ async def scan_logic(from_city=None, to_city=None):
                     buy = city_data[f_city].get('sell_price_min', 0)
                     if buy <= 100 or buy > max_buy_limit: continue
                     
-                    # Час купівлі
                     bd_dt = get_dt(city_data[f_city]['sell_price_min_date'])
                     buy_age_mins = (now - bd_dt).total_seconds() / 60
+                    
+                    # ЗАГАЛЬНИЙ ФІЛЬТР 3 ГОДИНИ (180 хв)
+                    if buy_age_mins > 180: continue
 
                     targets = [to_city] if to_city else [c for c in city_data if c != f_city]
                     for t_city in targets:
@@ -127,14 +129,13 @@ async def scan_logic(from_city=None, to_city=None):
                         
                         if sell <= buy or (sell/buy) > 10: continue
                         
-                        # Час продажу
                         sd_dt = get_dt(city_data[t_city].get(sd_key))
                         sell_age_mins = (now - sd_dt).total_seconds() / 60
 
-                        # СУВОРИЙ ЕКСТРА ФІЛЬТР (Обидві точки мають бути < 10 хв)
+                        # ЗАГАЛЬНИЙ ФІЛЬТР 3 ГОДИНИ ТА ЕКСТРА 30 ХВ
+                        if sell_age_mins > 180: continue
                         if extra_filter_active:
-                            if buy_age_mins > 10 or sell_age_mins > 10:
-                                continue
+                            if buy_age_mins > 30 or sell_age_mins > 30: continue
 
                         profit = int((sell * 0.935) - buy)
                         if profit > 5000:
@@ -160,9 +161,8 @@ async def main_search(message: types.Message, state: FSMContext):
     if max_buy_limit <= 0:
         await cmd_start(message, state)
         return
-
     if current_mode == "all":
-        await message.answer(f"🔍 Сканую (Всі міста, до {max_buy_limit:,})...", reply_markup=get_main_kb())
+        await message.answer(f"🔍 Сканую (Всі міста, ліміт {max_buy_limit:,})...", reply_markup=get_main_kb())
         res = await scan_logic()
         await display_results(message, res)
     else:
@@ -171,7 +171,7 @@ async def main_search(message: types.Message, state: FSMContext):
 
 @dp.message(BotState.waiting_for_limit)
 async def handle_limit_input(message: types.Message, state: FSMContext):
-    if message.text in ["🔍 Пошук", "⚙️ Ліміт", "🧮 Калькулятор"] or "Режими" in message.text: return
+    if message.text in ["🔍 Пошук", "⚙️ Ліміт", "🧮 Калькулятор"]: return
     text = message.text.replace(" ","").replace(",","")
     if text.isdigit():
         global max_buy_limit
@@ -200,7 +200,7 @@ async def modes_btn(message: types.Message):
 async def toggle_extra(message: types.Message):
     global extra_filter_active
     extra_filter_active = not extra_filter_active
-    status = "УВІМКНЕНО (суворий 10хв)" if extra_filter_active else "ВИМКНЕНО"
+    status = "УВІМКНЕНО (30 хв)" if extra_filter_active else "ВИМКНЕНО (ліміт 3 год)"
     await message.answer(f"⚡ Екстра фільтр: {status}", reply_markup=get_main_kb())
 
 @dp.callback_query(BotState.picking_from)
@@ -221,38 +221,26 @@ async def to_city(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.answer()
 
-@dp.message(F.text == "🧮 Калькулятор")
-async def calc_init(message: types.Message, state: FSMContext):
-    await message.answer("Введи ціну КУПІВЛІ:", reply_markup=ReplyKeyboardRemove())
-    await state.set_state(BotState.calc_buy)
-
-@dp.message(BotState.calc_buy)
-async def calc_b(message: types.Message, state: FSMContext):
-    if message.text.isdigit():
-        await state.update_data(b=int(message.text))
-        await message.answer("Введи ціну ПРОДАЖУ:")
-        await state.set_state(BotState.calc_sell)
-
-@dp.message(BotState.calc_sell)
-async def calc_s(message: types.Message, state: FSMContext):
-    if message.text.isdigit():
-        data = await state.get_data()
-        b, s = data['b'], int(message.text)
-        await message.answer(f"📊 П: {int(s*0.935-b):,} | Б: {int(s*0.895-b):,}", reply_markup=get_main_kb())
-        await state.clear()
-
 async def display_results(message, res):
     if not res:
         await message.answer("Нічого не знайдено.")
         return
-    # Сортування: спочатку за найсвіжішим сумарним часом, потім за профітом
     res.sort(key=lambda x: (max(get_dt(x['bd']), get_dt(x['sd'])), x['profit']), reverse=True)
     for r in res[:15]:
-        name = items_data.get(r['id'].split("@")[0], {}).get("LocalizedNames", {}).get("RU-RU", r['id'])
+        # Формуємо назву з Тіром і Зачаром: [8.1] Назва
+        item_raw = r['id'].split("@")
+        base_id = item_raw[0]
+        enchant = item_raw[1] if len(item_raw) > 1 else "0"
+        tier = base_id.split("_")[0].replace("T", "")
+        
+        name_data = items_data.get(base_id, {})
+        name = name_data.get("LocalizedNames", {}).get("RU-RU", base_id)
+        full_name = f"[{tier}.{enchant}] {name}" if enchant != "0" else f"[{tier}] {name}"
+        
         await message.answer(
-            f"📦 <b>{name}</b> ({QUALITY_NAMES[r['q']]})\n"
-            f"{CITY_EMOJIS[r['from']]} {r['from']} ➔ {CITY_EMOJIS[r['to']]} <b>{r['to']}</b>\n"
-            f"💰 Куп: {r['buy']:,} ({format_time(r['bd'])}) | Прод: {r['sell']:,} ({format_time(r['sd'])})\n"
+            f"📦 <b>{full_name}</b> ({QUALITY_NAMES[r['q']]})\n"
+            f"🛒 Купити: {CITY_EMOJIS[r['from']]} {r['from']} | <b>{r['buy']:,}</b> (⏳{format_time(r['bd'])})\n"
+            f"💰 Продати: {CITY_EMOJIS[r['to']]} {r['to']} | <b>{r['sell']:,}</b> (⏳{format_time(r['sd'])})\n"
             f"👑 Приб: <b>{r['profit']:,}</b>", parse_mode=ParseMode.HTML
         )
 
