@@ -159,8 +159,7 @@ async def main_search(message: types.Message, state: FSMContext):
         await display_results(message, res)
         await message.answer("Завершено.", reply_markup=get_main_kb())
     else:
-        await message.answer("📍 Шлях. Звідки веземо?", reply_markup=ReplyKeyboardRemove())
-        await message.answer("Оберіть місто:", reply_markup=get_city_inline())
+        await message.answer("📍 Шлях. Оберіть місто:", reply_markup=get_city_inline())
         await state.set_state(BotState.picking_from)
 
 @dp.message(F.text == "⚙️ Ліміт")
@@ -173,10 +172,10 @@ async def cmd_start(message: types.Message, state: FSMContext):
 @dp.message(F.text == "🧮 Калькулятор")
 async def calc_init(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer("🔢 Калькулятор. Введи ціну КУПІВЛІ:", reply_markup=ReplyKeyboardRemove())
+    await message.answer("🔢 Введи ціну КУПІВЛІ:", reply_markup=ReplyKeyboardRemove())
     await state.set_state(BotState.calc_buy)
 
-# ================= ОБРОБНИКИ ВВОДУ ЦИФР =================
+# ================= ОБРОБНИКИ ВВОДУ (СУВОРИЙ ПРІОРИТЕТ) =================
 @dp.message(BotState.waiting_for_limit)
 async def handle_limit_input(message: types.Message, state: FSMContext):
     text = message.text.replace(" ","").replace(",","")
@@ -184,9 +183,7 @@ async def handle_limit_input(message: types.Message, state: FSMContext):
         global max_buy_limit
         max_buy_limit = int(text)
         await state.clear()
-        await message.answer(f"✅ Ліміт {max_buy_limit:,} збережено. Обери режим:", reply_markup=get_mode_inline())
-    else:
-        await state.clear() # Якщо помилка - скидаємо, щоб кнопки працювали
+        await message.answer(f"✅ Ліміт {max_buy_limit:,} збережено.", reply_markup=get_main_kb())
 
 @dp.message(BotState.calc_buy)
 async def calc_b(message: types.Message, state: FSMContext):
@@ -194,10 +191,8 @@ async def calc_b(message: types.Message, state: FSMContext):
     if text.isdigit():
         val = int(text)
         await state.update_data(b=val)
-        await message.answer(f"✅ Купівля: {val:,}\n📤 Тепер введи ціну ПРОДАЖУ:")
-        await state.set_state(BotState.calc_sell)
-    else:
-        await message.answer("❌ Введи число!")
+        await message.answer(f"✅ Купівля: {val:,}\n📤 Введи ціну ПРОДАЖУ:")
+        await state.set_state(BotState.calc_sell) # ПРИМУСОВО ПЕРЕМИКАЄМО
 
 @dp.message(BotState.calc_sell)
 async def calc_s(message: types.Message, state: FSMContext):
@@ -206,10 +201,6 @@ async def calc_s(message: types.Message, state: FSMContext):
         data = await state.get_data()
         buy = data.get('b')
         sell = int(text)
-        if buy is None:
-            await message.answer("Помилка даних. Почни спочатку.", reply_markup=get_main_kb())
-            await state.clear()
-            return
         
         p_p, p_n = int(sell * 0.935 - buy), int(sell * 0.895 - buy)
         await message.answer(
@@ -219,11 +210,9 @@ async def calc_s(message: types.Message, state: FSMContext):
             reply_markup=get_main_kb(), 
             parse_mode=ParseMode.HTML
         )
-        await state.clear()
-    else:
-        await message.answer("❌ Введи число продажу!")
+        await state.clear() # ПОВНЕ ОЧИЩЕННЯ ПІСЛЯ РЕЗУЛЬТАТУ
 
-# ================= РЕЖИМИ ТА ІНШЕ =================
+# ================= РЕЖИМИ ТА CALLBACKS =================
 @dp.callback_query(F.data.startswith("set_mode_"))
 async def set_mode(callback: types.CallbackQuery, state: FSMContext):
     global current_mode
@@ -234,8 +223,7 @@ async def set_mode(callback: types.CallbackQuery, state: FSMContext):
         await display_results(callback.message, res)
         await callback.message.answer("Готово!", reply_markup=get_main_kb())
     else:
-        await callback.message.answer("📍 Шлях. Оберіть маршрут:", reply_markup=ReplyKeyboardRemove())
-        await callback.message.answer("Звідки веземо?", reply_markup=get_city_inline())
+        await callback.message.answer("📍 Шлях. Звідки веземо?", reply_markup=get_city_inline())
         await state.set_state(BotState.picking_from)
     await callback.answer()
 
