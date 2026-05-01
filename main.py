@@ -32,8 +32,20 @@ MARKET_BASE_URLS = [
 ]
 MARKET_PATH = "/api/v2/stats/prices/{}?locations={}"
 
-# Додано Black Market у список міст
-CITIES = ["Bridgewatch", "Martlock", "Lymhurst", "Thetford", "Caerleon", "Brecilien", "Black Market"]
+# Список міст
+CITIES = ["Bridgewatch", "Martlock", "Lymhurst", "Thetford", "Fort Sterling", "Caerleon", "Brecilien", "Black Market"]
+
+# Кольорове маркування міст
+CITY_EMOJIS = {
+    "Lymhurst": "🟢",
+    "Martlock": "🔵",
+    "Caerleon": "⚫",
+    "Thetford": "🟣",
+    "Bridgewatch": "🟠",
+    "Fort Sterling": "⚪",
+    "Brecilien": "🌸",
+    "Black Market": "🚩🏴"
+}
 
 QUALITY_NAMES = {1: "Обычное", 2: "Хорошее", 3: "Выдающееся", 4: "Отличное", 5: "Шедевр"}
 
@@ -182,11 +194,9 @@ async def scan_market():
                         city_to = entry_to.get("city")
                         if city_from == city_to or city_from not in CITIES or city_to not in CITIES: continue
 
-                        # Скупка (купуємо найдешевше)
                         buy = entry_from.get("sell_price_min", 0)
                         bd = entry_from.get("sell_price_min_date", "")
                         
-                        # Продаж (якщо це Black Market - дивимося buy_price_max, це ціна, за яку система забере миттєво)
                         if city_to == "Black Market":
                             sell = entry_to.get("buy_price_max", 0)
                             sd = entry_to.get("buy_price_max_date", "")
@@ -214,9 +224,14 @@ async def send_flips(results, message):
     for item_id, quality, city_from, city_to, buy, sell, profit_prem, profit_norm, bd, sd in results[:30]:
         item_name = get_item_name(item_id)
         q_name = QUALITY_NAMES.get(quality, "Обычное")
+        
+        # Отримуємо емодзі для міст
+        from_emoji = CITY_EMOJIS.get(city_from, "🏙")
+        to_emoji = CITY_EMOJIS.get(city_to, "🏙")
+        
         await message.answer(
             f"📦 <b>{item_name}</b> (<i>{q_name}</i>)\n"
-            f"🔹 {city_from} → 🚩 <b>{city_to}</b>\n"
+            f"{from_emoji} {city_from} ➔ {to_emoji} <b>{city_to}</b>\n"
             f"💰 Купити: <b>{buy:,}</b> ⏳ <i>{format_time_ago(bd)}</i>\n"
             f"💸 Продати: <b>{sell:,}</b> ⏳ <i>{format_time_ago(sd)}</i>\n\n"
             f"👑 Прибуток (Прем): <b>{profit_prem:,}</b>\n"
