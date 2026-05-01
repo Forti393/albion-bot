@@ -117,9 +117,7 @@ async def scan_logic(from_city=None, to_city=None):
                     
                     bd_dt = get_dt(city_data[f_city]['sell_price_min_date'])
                     buy_age_mins = (now - bd_dt).total_seconds() / 60
-                    
-                    # ЗАГАЛЬНИЙ ФІЛЬТР 3 ГОДИНИ (180 хв)
-                    if buy_age_mins > 180: continue
+                    if buy_age_mins > 180: continue 
 
                     targets = [to_city] if to_city else [c for c in city_data if c != f_city]
                     for t_city in targets:
@@ -132,16 +130,16 @@ async def scan_logic(from_city=None, to_city=None):
                         sd_dt = get_dt(city_data[t_city].get(sd_key))
                         sell_age_mins = (now - sd_dt).total_seconds() / 60
 
-                        # ЗАГАЛЬНИЙ ФІЛЬТР 3 ГОДИНИ ТА ЕКСТРА 30 ХВ
-                        if sell_age_mins > 180: continue
+                        if sell_age_mins > 180: continue 
                         if extra_filter_active:
                             if buy_age_mins > 30 or sell_age_mins > 30: continue
 
-                        profit = int((sell * 0.935) - buy)
-                        if profit > 5000:
+                        p_prem = int((sell * 0.935) - buy)
+                        p_norm = int((sell * 0.895) - buy)
+                        if p_prem > 5000:
                             results.append({
                                 'id': i_id, 'q': int(qual), 'from': f_city, 'to': t_city,
-                                'buy': buy, 'sell': sell, 'profit': profit,
+                                'buy': buy, 'sell': sell, 'p_p': p_prem, 'p_n': p_norm,
                                 'bd': city_data[f_city]['sell_price_min_date'],
                                 'sd': city_data[t_city].get(sd_key)
                             })
@@ -166,7 +164,9 @@ async def main_search(message: types.Message, state: FSMContext):
         res = await scan_logic()
         await display_results(message, res)
     else:
-        await message.answer("📍 Режим Шлях. Звідки веземо?", reply_markup=get_city_inline())
+        # Прибираємо кнопки, щоб не збити вибір міст
+        await message.answer("📍 Режим Шлях. Звідки веземо?", reply_markup=ReplyKeyboardRemove())
+        await message.answer("Обери місто відправки:", reply_markup=get_city_inline())
         await state.set_state(BotState.picking_from)
 
 @dp.message(BotState.waiting_for_limit)
@@ -203,6 +203,7 @@ async def toggle_extra(message: types.Message):
     status = "УВІМКНЕНО (30 хв)" if extra_filter_active else "ВИМКНЕНО (ліміт 3 год)"
     await message.answer(f"⚡ Екстра фільтр: {status}", reply_markup=get_main_kb())
 
+# --- ВИБІР ШЛЯХУ (БЕЗПЕЧНИЙ) ---
 @dp.callback_query(BotState.picking_from)
 async def from_city(callback: types.CallbackQuery, state: FSMContext):
     city = callback.data.split("_")[1]
@@ -215,33 +216,70 @@ async def to_city(callback: types.CallbackQuery, state: FSMContext):
     t_c = callback.data.split("_")[1]
     data = await state.get_data()
     f_c = data.get('f_c')
-    await callback.message.edit_text(f"🚀 {f_c} ➔ {t_c}...")
+    await callback.message.edit_text(f"🚀 Шукаю шлях: {f_c} ➔ {t_c}...")
     res = await scan_logic(f_c, t_c)
     await display_results(callback.message, res)
     await state.clear()
+    # Повертаємо кнопки після завершення
+    await callback.message.answer("Пошук завершено. Меню повернуто:", reply_markup=get_main_kb())
     await callback.answer()
+
+# --- КАЛЬКУЛЯТОР (ЖИВИЙ) ---
+@dp.message(F.text == "🧮 Калькулятор")
+async def calc_init(message: types.Message, state: FSMContext):
+    await message.answer("Введи ціну КУПІВЛІ (Item Buy Price):", reply_markup=ReplyKeyboardRemove())
+    await state.set_state(BotState.calc_buy)
+
+@dp.message(BotState.calc_buy)
+async def calc_b(message: types.Message, state: FSMContext):
+    text = message.text.replace(" ","").replace(",","")
+    if text.isdigit():
+        await state.update_data(b=int(text))
+        await message.answer("Введи ціну ПРОДАЖУ (Market Sell Price):")
+        await state.set_state(BotState.calc_sell)
+
+@dp.message(BotState.calc_sell)
+async def calc_s(message: types.Message, state: FSMContext):
+    text = message.text.replace(" ","").replace(",","")
+    if text.isdigit():
+        data = await state.get_data()
+        buy = data['b']
+        sell = int(text)
+        
+        # Розрахунок: П - прем (6.5% податків), Б - бомж (10.5% податків)
+        p_prem = int((sell * 0.935) - buy)
+        p_norm = int((sell * 0.895) - buy)
+        
+        await message.answer(
+            f"📊 <b>Результати калькулятора:</b>\n\n"
+            f"📦 Купівля: {buy:,}\n"
+            f"💰 Продаж: {sell:,}\n"
+            f"──────────────────\n"
+            f"👑 Прибуток (Прем): <b>{p_prem:,}</b>\n"
+            f"💀 Прибуток (Без): <b>{p_norm:,}</b>",
+            reply_markup=get_main_kb(), parse_mode=ParseMode.HTML
+        )
+        await state.clear()
 
 async def display_results(message, res):
     if not res:
-        await message.answer("Нічого не знайдено.")
+        await message.answer("Нічого не знайдено за цими параметрами.")
         return
-    res.sort(key=lambda x: (max(get_dt(x['bd']), get_dt(x['sd'])), x['profit']), reverse=True)
+    res.sort(key=lambda x: (max(get_dt(x['bd']), get_dt(x['sd'])), x['p_p']), reverse=True)
     for r in res[:15]:
-        # Формуємо назву з Тіром і Зачаром: [8.1] Назва
         item_raw = r['id'].split("@")
         base_id = item_raw[0]
         enchant = item_raw[1] if len(item_raw) > 1 else "0"
         tier = base_id.split("_")[0].replace("T", "")
-        
-        name_data = items_data.get(base_id, {})
-        name = name_data.get("LocalizedNames", {}).get("RU-RU", base_id)
+        name = items_data.get(base_id, {}).get("LocalizedNames", {}).get("RU-RU", base_id)
         full_name = f"[{tier}.{enchant}] {name}" if enchant != "0" else f"[{tier}] {name}"
         
         await message.answer(
             f"📦 <b>{full_name}</b> ({QUALITY_NAMES[r['q']]})\n"
             f"🛒 Купити: {CITY_EMOJIS[r['from']]} {r['from']} | <b>{r['buy']:,}</b> (⏳{format_time(r['bd'])})\n"
             f"💰 Продати: {CITY_EMOJIS[r['to']]} {r['to']} | <b>{r['sell']:,}</b> (⏳{format_time(r['sd'])})\n"
-            f"👑 Приб: <b>{r['profit']:,}</b>", parse_mode=ParseMode.HTML
+            f"👑 Приб: <b>{r['p_p']:,}</b> | 💀: <b>{r['p_n']:,}</b>", 
+            parse_mode=ParseMode.HTML
         )
 
 @dp.message(F.text == "🔁 Оновити базу")
