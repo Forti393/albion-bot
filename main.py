@@ -102,7 +102,6 @@ def get_item_name(item_id):
         
     item = items_data.get(base_id, {})
     loc_names = item.get("LocalizedNames", {})
-    # Беремо російську назву, як ти просив
     name = loc_names.get("RU-RU", loc_names.get("EN-US", base_id))
     
     if tier:
@@ -206,13 +205,15 @@ async def scan_market():
                 i_id = entry.get("item_id")
                 quality = entry.get("quality", 1)
                 
-                key = f"{i_id}_{quality}"
+                # ВИПРАВЛЕНО: використовуємо "|" замість "_" щоб уникнути конфлікту з іменами предметів
+                key = f"{i_id}|{quality}"
                 if key not in grouped_data:
                     grouped_data[key] = []
                 grouped_data[key].append(entry)
 
             for key_id, entries in grouped_data.items():
-                i_id, quality_str = key_id.split("_", 1)
+                # ВИПРАВЛЕНО: розбиваємо по "|"
+                i_id, quality_str = key_id.split("|")
                 quality = int(quality_str)
                 
                 for entry_from in entries:
@@ -307,7 +308,6 @@ async def main():
     print("⏳ Очікування 10 секунд перед стартом (уникнення конфлікту з попередньою версією)...")
     await asyncio.sleep(10)
     
-    # Видаляємо старі вебхуки та завислі апдейти, якщо вони були
     await bot.delete_webhook(drop_pending_updates=True) 
     
     await download_items()
