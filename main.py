@@ -94,6 +94,23 @@ def get_item_type(item_id):
     item = items_data.get(base)
     return item.get("ShopCategory", "unknown") if item else "unknown"
 
+def get_item_name(item_id):
+    """Отримує нормальну локалізовану назву предмета."""
+    base_id = item_id.split("@")[0]
+    enchant = item_id.split("@")[1] if "@" in item_id else ""
+    
+    item = items_data.get(base_id, {})
+    loc_names = item.get("LocalizedNames", {})
+    
+    # Дістаємо російську назву. Якщо її раптом немає - беремо англійську або сам ID
+    name = loc_names.get("RU-RU", loc_names.get("EN-US", base_id))
+    
+    # Якщо є рівень зачарування (наприклад @1), додаємо його до назви як .1
+    if enchant:
+        name += f" .{enchant}"
+        
+    return name
+
 def enchant_multiplier(e):
     return {1: 1.5, 2: 2, 3: 3, 4: 5}.get(e, 1)
 
@@ -149,7 +166,7 @@ async def fetch_prices(session, items_chunk_str, cities_str):
                     data = await resp.json()
                     if data:
                         return data
-        except Exception as e:
+        except Exception:
             continue
     return None
 
@@ -255,10 +272,11 @@ async def scan_market():
 
 async def send_flips(results, message):
     global last_sent
-    # Відправляємо перші 30 результатів, щоб не заспамити Телеграм, якщо їх дуже багато
     for item_id, city_from, city_to, buy, sell, profit in results[:30]:
+        item_name = get_item_name(item_id)
+        
         await message.answer(
-            f"📦 <b>{item_id}</b>\n"
+            f"📦 <b>{item_name}</b>\n"
             f"🔹 {city_from} → {city_to}\n"
             f"💰 Купити: <b>{buy}</b>\n"
             f"💸 Продати: <b>{sell}</b>\n"
@@ -267,7 +285,7 @@ async def send_flips(results, message):
         )
     
     if len(results) > 30:
-        await message.answer(f"⚠️ Знайдено ще {len(results) - 30} фліпів, але показано лише перші 30, щоб не спамити.")
+        await message.answer(f"⚠️ Знайдено ще {len(results) - 30} фліпів, але показано лише перші 30.")
 
 @dp.message(Command("scan"))
 async def scan_cmd(message: types.Message):
