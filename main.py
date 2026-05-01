@@ -35,7 +35,7 @@ CITIES = ["Bridgewatch", "Martlock", "Lymhurst", "Thetford", "Caerleon", "Brecil
 
 QUALITY_NAMES = {1: "Обычное", 2: "Хорошее", 3: "Выдающееся", 4: "Отличное", 5: "Шедевр"}
 
-# Тепер стартуємо з нуля, щоб бот ОБОВ'ЯЗКОВО запитав ліміт у користувача
+# Дефолтний ліміт при запуску бота (змінюється через ТГ)
 MAX_BUY_PRICE = 0
 # ================================================
 
@@ -226,6 +226,7 @@ async def scan_market():
                         profit_prem = int((sell * 0.935) - buy)
                         profit_norm = int((sell * 0.895) - buy)
 
+                        # Застосовуємо динамічний ліміт
                         if profit_prem >= 5000 and buy <= MAX_BUY_PRICE:
                             hash_key = f"{i_id}_{quality}_{city_from}_{city_to}_{sell}"
                             if hash_key not in last_sent:
@@ -321,4 +322,43 @@ async def scan_cmd(message: types.Message, state: FSMContext):
         await message.answer("Немає нових свіжих фліпів у межах бюджету.")
     else:
         await send_flips(results, message)
-    scan
+    scan_running = False
+
+@dp.message(lambda m: m.text == "🔄 Оновити зараз")
+async def refresh_cmd(message: types.Message, state: FSMContext):
+    await scan_cmd(message, state)
+
+@dp.message(lambda m: m.text == "🔁 Перезапустити бота")
+async def restart_cmd(message: types.Message):
+    global last_sent, last_cache_clear
+    last_sent.clear()
+    last_cache_clear = datetime.now(UTC)
+    await message.answer("♻️ Перезапускаю бота і завантажую свіжі предмети...", reply_markup=keyboard)
+    await download_items()
+    global items_data
+    items_data = filter_items()
+    await message.answer("✅ Готово! Натисни '🔄 Оновити зараз' або /scan")
+
+async def main():
+    await asyncio.sleep(2)
+    await bot.delete_webhook(drop_pending_updates=True) 
+    
+    await download_items()
+    global items_data
+    items_data = filter_items()
+    
+    print("🚀 Підключення до Telegram...")
+    
+    while True:
+        try:
+            await dp.start_polling(bot)
+            break
+        except TelegramConflictError:
+            print("⚠️ Конфлікт підключення: стара копія бота ще працює. Чекаємо...")
+            await asyncio.sleep(10)
+        except Exception as e:
+            print(f"❌ Помилка: {e}")
+            await asyncio.sleep(10)
+
+if __name__ == "__main__":
+    asyncio.run(main())
