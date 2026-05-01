@@ -35,7 +35,7 @@ class BotState(StatesGroup):
 bot = Bot(token=os.environ.get("BOT_TOKEN"))
 dp = Dispatcher()
 items_data = {}
-max_buy_limit = 0
+max_buy_limit = 0  # Зберігаємо ліміт тут
 extra_filter_active = False 
 current_mode = "all" 
 
@@ -139,39 +139,42 @@ async def scan_logic(from_city=None, to_city=None):
 @dp.message(Command("start"))
 @dp.message(F.text == "⚙️ Ліміт")
 async def cmd_start(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer("💰 Вкажи максимальну ціну покупки за 1 предмет:", reply_markup=ReplyKeyboardRemove())
     await state.set_state(BotState.waiting_for_limit)
+    await message.answer("💰 Вкажи макс. ціну покупки за 1 предмет:", reply_markup=ReplyKeyboardRemove())
 
 @dp.message(F.text == "🔍 Пошук")
 async def main_search(message: types.Message, state: FSMContext):
-    if max_buy_limit <= 0:
-        await cmd_start(message, state)
-        return
-    await state.clear() # На всякий випадок чистимо стани перед пошуком
-    if current_mode == "all":
-        await message.answer(f"🔍 Сканую (Всі міста, до {max_buy_limit:,})...")
-        res = await scan_logic()
-        await display_results(message, res)
+    # Якщо ліміт вже є в глобальній змінні, просто шукаємо
+    if max_buy_limit > 0:
+        await state.clear() # Скидаємо будь-які стани, щоб не заважали
+        if current_mode == "all":
+            await message.answer(f"🔍 Сканую (Всі міста, до {max_buy_limit:,})...", reply_markup=get_main_kb())
+            res = await scan_logic()
+            await display_results(message, res)
+        else:
+            await message.answer("📍 Звідки веземо?", reply_markup=get_city_inline())
+            await state.set_state(BotState.picking_from)
     else:
-        await message.answer("📍 Звідки веземо?", reply_markup=get_city_inline())
-        await state.set_state(BotState.picking_from)
+        # Якщо ліміту немає (наприклад, перший запуск), просимо ввести
+        await cmd_start(message, state)
 
 @dp.message(BotState.waiting_for_limit)
 async def handle_limit_input(message: types.Message, state: FSMContext):
-    # Якщо це не число - ігноруємо, бо це може бути натискання на кнопку Пошук
     text = message.text.replace(" ","").replace(",","")
     if text.isdigit():
         global max_buy_limit
         max_buy_limit = int(text)
         await state.clear()
-        await message.answer(f"✅ Ліміт {max_buy_limit:,} встановлено. Обери режим:", reply_markup=get_mode_inline())
+        await message.answer(f"✅ Ліміт {max_buy_limit:,} збережено. Обери режим:", reply_markup=get_mode_inline())
     else:
-        # Якщо в стані ліміту ввели не число - просто не реагуємо, щоб не блокувати кнопки
-        return
+        # Якщо введено не число, але натиснуто Пошук - обробляємо пошук
+        if message.text == "🔍 Пошук":
+            await main_search(message, state)
+        else:
+            await message.answer("Введи число!")
 
 @dp.callback_query(F.data.startswith("set_mode_"))
-async def set_mode(callback: types.CallbackQuery):
+async def set_mode(callback: types.CallbackQuery, state: FSMContext):
     global current_mode
     current_mode = callback.data.split("_")[2]
     await callback.message.answer(f"✅ Режим: {'Всі міста' if current_mode=='all' else 'Шлях'}", reply_markup=get_main_kb())
@@ -188,9 +191,9 @@ async def modes_btn(message: types.Message):
 async def toggle_extra(message: types.Message):
     global extra_filter_active
     extra_filter_active = not extra_filter_active
-    await message.answer(f"⚡ Фільтр 10хв: {'УВІМКНЕНО' if extra_filter_active else 'ВИМКНЕНО'}", reply_markup=get_main_kb())
+    await message.answer(f"⚡ Екстра фільтр: {'УВІМКНЕНО' if extra_filter_active else 'ВИМКНЕНО'}", reply_markup=get_main_kb())
 
-# --- ВИБІР ШЛЯХУ (Inline) ---
+# --- ВИБІР ШЛЯХУ ---
 @dp.callback_query(BotState.picking_from)
 async def from_city(callback: types.CallbackQuery, state: FSMContext):
     city = callback.data.split("_")[1]
@@ -207,7 +210,7 @@ async def to_city(callback: types.CallbackQuery, state: FSMContext):
     res = await scan_logic(f_c, t_c)
     await display_results(callback.message, res)
     await state.clear()
-    await callback.message.answer("Меню:", reply_markup=get_main_kb())
+    await callback.message.answer("Готово!", reply_markup=get_main_kb())
 
 # --- КАЛЬКУЛЯТОР ---
 @dp.message(F.text == "🧮 Калькулятор")
@@ -217,18 +220,16 @@ async def calc_init(message: types.Message, state: FSMContext):
 
 @dp.message(BotState.calc_buy)
 async def calc_b(message: types.Message, state: FSMContext):
-    text = message.text.replace(" ","")
-    if text.isdigit():
-        await state.update_data(b=int(text))
+    if message.text.isdigit():
+        await state.update_data(b=int(message.text))
         await message.answer("Введи ціну ПРОДАЖУ:")
         await state.set_state(BotState.calc_sell)
 
 @dp.message(BotState.calc_sell)
 async def calc_s(message: types.Message, state: FSMContext):
-    text = message.text.replace(" ","")
-    if text.isdigit():
+    if message.text.isdigit():
         data = await state.get_data()
-        b, s = data['b'], int(text)
+        b, s = data['b'], int(message.text)
         await message.answer(f"📊 П: {int(s*0.935-b):,} | Б: {int(s*0.895-b):,}", reply_markup=get_main_kb())
         await state.clear()
 
@@ -238,11 +239,9 @@ async def display_results(message, res):
         return
     res.sort(key=lambda x: (max(get_dt(x['bd']), get_dt(x['sd'])), x['profit']), reverse=True)
     for r in res[:15]:
-        name_data = items_data.get(r['id'].split("@")[0], {})
-        name = name_data.get("LocalizedNames", {}).get("RU-RU", r['id'])
-        q = QUALITY_NAMES.get(r['q'], "Обычное")
+        name = items_data.get(r['id'].split("@")[0], {}).get("LocalizedNames", {}).get("RU-RU", r['id'])
         await message.answer(
-            f"📦 <b>{name}</b> ({q})\n"
+            f"📦 <b>{name}</b> ({QUALITY_NAMES[r['q']]})\n"
             f"{CITY_EMOJIS[r['from']]} {r['from']} ➔ {CITY_EMOJIS[r['to']]} <b>{r['to']}</b>\n"
             f"💰 Куп: {r['buy']:,} ({format_time(r['bd'])}) | Прод: {r['sell']:,} ({format_time(r['sd'])})\n"
             f"👑 Приб: <b>{r['profit']:,}</b>", parse_mode=ParseMode.HTML
