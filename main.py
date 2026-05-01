@@ -74,7 +74,6 @@ async def download_items():
             text = await resp.text()
             raw_data = json.loads(text)
             allowed = ["weapon", "armor", "plate", "leather", "cloth", "bag", "cape", "potion", "meal", "mount", "relic", "artefact", "tool", "shapeshifter"]
-            # Фільтруємо одразу при завантаженні для економії ресурсів
             items_data = {
                 item["UniqueName"]: item for item in raw_data 
                 if item["UniqueName"].startswith(("T4_", "T5_", "T6_", "T7_", "T8_")) 
@@ -177,7 +176,6 @@ async def main_search(message: types.Message, state: FSMContext):
 
 @dp.message(BotState.waiting_for_limit)
 async def handle_limit_input(message: types.Message, state: FSMContext):
-    # Якщо натиснута будь-яка кнопка меню - скасовуємо очікування ліміту
     if any(x in message.text for x in ["🔍", "🗺️", "⚡", "🚫", "🧮", "⚙️", "🔁"]):
         await state.clear()
         return
@@ -235,18 +233,22 @@ async def to_city(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer("Готово!", reply_markup=get_main_kb())
     await callback.answer()
 
+# --- КАЛЬКУЛЯТОР ---
 @dp.message(F.text == "🧮 Калькулятор")
 async def calc_init(message: types.Message, state: FSMContext):
-    await message.answer("Введіть ціну КУПІВЛІ:", reply_markup=ReplyKeyboardRemove())
+    await message.answer("🔢 Введи ціну КУПІВЛІ:", reply_markup=ReplyKeyboardRemove())
     await state.set_state(BotState.calc_buy)
 
 @dp.message(BotState.calc_buy)
 async def calc_b(message: types.Message, state: FSMContext):
     text = message.text.replace(" ","")
     if text.isdigit():
-        await state.update_data(b=int(text))
-        await message.answer("Введіть ціну ПРОДАЖУ:")
+        val = int(text)
+        await state.update_data(b=val)
+        await message.answer(f"✅ Прийняв купівлю: {val:,}\n📤 Тепер введи ціну ПРОДАЖУ:")
         await state.set_state(BotState.calc_sell)
+    else:
+        await message.answer("❌ Введи число ціни!")
 
 @dp.message(BotState.calc_sell)
 async def calc_s(message: types.Message, state: FSMContext):
@@ -256,6 +258,8 @@ async def calc_s(message: types.Message, state: FSMContext):
         b, s = data['b'], int(text)
         await message.answer(f"📊 П: <b>{int(s*0.935-b):,}</b> | Б: <b>{int(s*0.895-b):,}</b>", reply_markup=get_main_kb(), parse_mode=ParseMode.HTML)
         await state.clear()
+    else:
+        await message.answer("❌ Введи число ціни!")
 
 async def display_results(message, res):
     if not res:
