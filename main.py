@@ -63,7 +63,7 @@ def get_city_inline():
     buttons = [[InlineKeyboardButton(text=f"{CITY_EMOJIS[c]} {c}", callback_data=f"city_{c}")] for c in CITIES if c != "Black Market"]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# ================= ЛОГІКА =================
+# ================= ЛОГІКА ДАНИХ =================
 async def download_items():
     global items_data
     async with aiohttp.ClientSession() as session:
@@ -109,21 +109,32 @@ async def scan_logic(from_city=None, to_city=None):
             for k, city_data in grouped.items():
                 i_id, qual = k.split("|")
                 sources = [from_city] if from_city else [c for c in city_data if c != "Black Market"]
+                
                 for f_city in sources:
                     if f_city not in city_data: continue
                     buy = city_data[f_city].get('sell_price_min', 0)
                     if buy <= 100 or buy > max_buy_limit: continue
+                    
+                    # Час купівлі
                     bd_dt = get_dt(city_data[f_city]['sell_price_min_date'])
-                    if extra_filter_active and (now - bd_dt) > timedelta(minutes=10): continue
+                    buy_age_mins = (now - bd_dt).total_seconds() / 60
 
                     targets = [to_city] if to_city else [c for c in city_data if c != f_city]
                     for t_city in targets:
                         if t_city not in city_data: continue
                         sd_key = 'buy_price_max_date' if t_city == "Black Market" else 'sell_price_min_date'
                         sell = city_data[t_city].get('buy_price_max' if t_city == "Black Market" else 'sell_price_min', 0)
+                        
                         if sell <= buy or (sell/buy) > 10: continue
+                        
+                        # Час продажу
                         sd_dt = get_dt(city_data[t_city].get(sd_key))
-                        if extra_filter_active and (now - sd_dt) > timedelta(minutes=10): continue
+                        sell_age_mins = (now - sd_dt).total_seconds() / 60
+
+                        # СУВОРИЙ ЕКСТРА ФІЛЬТР (Обидві точки мають бути < 10 хв)
+                        if extra_filter_active:
+                            if buy_age_mins > 10 or sell_age_mins > 10:
+                                continue
 
                         profit = int((sell * 0.935) - buy)
                         if profit > 5000:
@@ -145,7 +156,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
 
 @dp.message(F.text == "🔍 Пошук")
 async def main_search(message: types.Message, state: FSMContext):
-    await state.clear() # ПРИМУСОВО ВИХОДИМО З УСІХ СТАНІВ ПРИ НАТИСКАННІ ПОШУКУ
+    await state.clear()
     if max_buy_limit <= 0:
         await cmd_start(message, state)
         return
@@ -160,18 +171,13 @@ async def main_search(message: types.Message, state: FSMContext):
 
 @dp.message(BotState.waiting_for_limit)
 async def handle_limit_input(message: types.Message, state: FSMContext):
-    # Якщо прийшов текст будь-якої кнопки — це не ліміт, ігноруємо
-    if message.text in ["🔍 Пошук", "⚙️ Ліміт", "🧮 Калькулятор", "🔁 Оновити базу"] or "Режими" in message.text or "Екстра" in message.text:
-        return
-
+    if message.text in ["🔍 Пошук", "⚙️ Ліміт", "🧮 Калькулятор"] or "Режими" in message.text: return
     text = message.text.replace(" ","").replace(",","")
     if text.isdigit():
         global max_buy_limit
         max_buy_limit = int(text)
         await state.clear()
-        await message.answer(f"✅ Ліміт {max_buy_limit:,} збережено. Обери режим:", reply_markup=get_mode_inline())
-    else:
-        await message.answer("Введи число!")
+        await message.answer(f"✅ Ліміт {max_buy_limit:,} збережено.", reply_markup=get_mode_inline())
 
 @dp.callback_query(F.data.startswith("set_mode_"))
 async def set_mode(callback: types.CallbackQuery, state: FSMContext):
@@ -194,7 +200,8 @@ async def modes_btn(message: types.Message):
 async def toggle_extra(message: types.Message):
     global extra_filter_active
     extra_filter_active = not extra_filter_active
-    await message.answer(f"⚡ Фільтр 10хв: {'УВІМКНЕНО' if extra_filter_active else 'ВИМКНЕНО'}", reply_markup=get_main_kb())
+    status = "УВІМКНЕНО (суворий 10хв)" if extra_filter_active else "ВИМКНЕНО"
+    await message.answer(f"⚡ Екстра фільтр: {status}", reply_markup=get_main_kb())
 
 @dp.callback_query(BotState.picking_from)
 async def from_city(callback: types.CallbackQuery, state: FSMContext):
@@ -238,6 +245,7 @@ async def display_results(message, res):
     if not res:
         await message.answer("Нічого не знайдено.")
         return
+    # Сортування: спочатку за найсвіжішим сумарним часом, потім за профітом
     res.sort(key=lambda x: (max(get_dt(x['bd']), get_dt(x['sd'])), x['profit']), reverse=True)
     for r in res[:15]:
         name = items_data.get(r['id'].split("@")[0], {}).get("LocalizedNames", {}).get("RU-RU", r['id'])
