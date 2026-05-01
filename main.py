@@ -11,9 +11,10 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 print("ФАЙЛ ЗАПУЩЕНО:", __file__)
 
 # Отримання токена з Railway Variables
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 if not BOT_TOKEN:
+    print("🚨 АЛАРМ! Доступні змінні в системі:", list(os.environ.keys()))
     raise Exception("❌ BOT_TOKEN не знайдено! Додай його у Railway → Variables")
 
 bot = Bot(token=BOT_TOKEN)
@@ -31,6 +32,7 @@ MARKET_PATH = "/api/v2/stats/prices/{}?locations={}"
 
 CITIES = ["Bridgewatch", "Martlock", "Lymhurst", "Thetford", "Caerleon", "Brecilien"]
 
+# Залишаємо якості російською, щоб збігалося з клієнтом гри
 QUALITY_NAMES = {
     1: "Обычное",
     2: "Хорошее",
@@ -110,6 +112,26 @@ def get_item_name(item_id):
 
 def enchant_multiplier(e):
     return {1: 1.5, 2: 2, 3: 3, 4: 5}.get(e, 1)
+
+def format_time_ago(date_str):
+    """Перетворює час з API у зручний формат 'Х хв. тому'."""
+    if not date_str or date_str.startswith("0001"):
+        return "Невідомо"
+    try:
+        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        now = datetime.now(UTC)
+        diff = now - dt
+        minutes = int(diff.total_seconds() / 60)
+        
+        if minutes < 0:
+            return "Щойно"
+        elif minutes < 60:
+            return f"{minutes} хв. тому"
+        else:
+            hours = minutes // 60
+            return f"{hours} год. тому"
+    except:
+        return "Невідомо"
 
 def is_fake(item_type, enchant, buy, sell, buy_date, sell_date):
     if buy <= 0 or sell <= 0:
@@ -205,14 +227,12 @@ async def scan_market():
                 i_id = entry.get("item_id")
                 quality = entry.get("quality", 1)
                 
-                # ВИПРАВЛЕНО: використовуємо "|" замість "_" щоб уникнути конфлікту з іменами предметів
                 key = f"{i_id}|{quality}"
                 if key not in grouped_data:
                     grouped_data[key] = []
                 grouped_data[key].append(entry)
 
             for key_id, entries in grouped_data.items():
-                # ВИПРАВЛЕНО: розбиваємо по "|"
                 i_id, quality_str = key_id.split("|")
                 quality = int(quality_str)
                 
@@ -245,24 +265,30 @@ async def scan_market():
                             hash_key = f"{i_id}_{quality}_{city_from}_{city_to}_{sell}"
                             if hash_key not in last_sent:
                                 real_count += 1
-                                results.append((i_id, quality, city_from, city_to, buy, sell, profit_prem, profit_norm))
+                                # Передаємо також bd (дата купівлі) та sd (дата продажу)
+                                results.append((i_id, quality, city_from, city_to, buy, sell, profit_prem, profit_norm, bd, sd))
                                 last_sent[hash_key] = True
 
     return results
 
 async def send_flips(results, message):
     global last_sent
+    # Сортуємо результати за прибутком
     results.sort(key=lambda x: x[6], reverse=True)
     
-    for item_id, quality, city_from, city_to, buy, sell, profit_prem, profit_norm in results[:30]:
+    for item_id, quality, city_from, city_to, buy, sell, profit_prem, profit_norm, bd, sd in results[:30]:
         item_name = get_item_name(item_id)
         q_name = QUALITY_NAMES.get(quality, "Неизвестно")
+        
+        # Форматуємо час для виводу
+        buy_time = format_time_ago(bd)
+        sell_time = format_time_ago(sd)
         
         await message.answer(
             f"📦 <b>{item_name}</b> (<i>{q_name}</i>)\n"
             f"🔹 {city_from} → {city_to}\n"
-            f"💰 Купити: <b>{buy:,}</b>\n"
-            f"💸 Продати: <b>{sell:,}</b>\n\n"
+            f"💰 Купити: <b>{buy:,}</b> ⏳ <i>{buy_time}</i>\n"
+            f"💸 Продати: <b>{sell:,}</b> ⏳ <i>{sell_time}</i>\n\n"
             f"👑 Прибуток (Прем): <b>{profit_prem:,}</b>\n"
             f"💀 Прибуток (Без Прем): <b>{profit_norm:,}</b>",
             parse_mode=ParseMode.HTML
