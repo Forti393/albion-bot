@@ -7,18 +7,14 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from aiogram.exceptions import TelegramConflictError
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 # ================= НАЛАШТУВАННЯ =================
-MARKET_BASE_URLS = [
-    "https://europe.albion-online-data.com", # Твій сервер (EU)
-    "https://www.albion-online-data.com",
-]
-
-ITEMS_URL = "https://raw.githubusercontent.com/ao-data/ao-bin-dumps/master/formatted/items.json"
+# Тільки одне джерело — Європа
+MARKET_BASE_URL = "https://europe.albion-online-data.com"
 MARKET_PATH = "/api/v2/stats/prices/{}?locations={}"
+ITEMS_URL = "https://raw.githubusercontent.com/ao-data/ao-bin-dumps/master/formatted/items.json"
 
 CITIES = ["Bridgewatch", "Martlock", "Lymhurst", "Thetford", "Fort Sterling", "Caerleon", "Brecilien", "Black Market"]
 
@@ -67,22 +63,38 @@ def filter_items():
     return filtered
 
 async def fetch_prices(session, items_chunk_str, cities_str):
-    for base in MARKET_BASE_URLS:
-        url = base + MARKET_PATH.format(items_chunk_str, cities_str)
-        try:
-            async with session.get(url, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data: return data
-        except: continue
+    url = f"{MARKET_BASE_URL}{MARKET_PATH.format(items_chunk_str, cities_str)}"
+    try:
+        async with session.get(url, timeout=10) as resp:
+            if resp.status == 200:
+                return await resp.json()
+    except:
+        return None
     return None
+
+def format_time(date_str):
+    if not date_str or date_str.startswith("0001"): return "???"
+    try:
+        # Albion Data надсилає час у форматі ISO 8601 без Z або з ним
+        clean_date = date_str.split(".")[0].replace("Z", "")
+        dt = datetime.fromisoformat(clean_date).replace(tzinfo=UTC)
+        now = datetime.now(UTC)
+        diff = now - dt
+        
+        total_mins = int(diff.total_seconds() / 60)
+        if total_mins < 0: return "зараз"
+        if total_mins < 60: return f"{total_mins}м"
+        if total_mins < 1440: return f"{total_mins//60}г"
+        return f"{total_mins//1440}д"
+    except:
+        return "???"
 
 async def scan_market():
     global last_sent, MAX_BUY_PRICE
     results = []
     item_ids = list(items_data.keys())
-    
     cities_str = ",".join(CITIES)
+    
     async with aiohttp.ClientSession() as session:
         for i in range(0, len(item_ids), 50):
             chunk = item_ids[i:i + 50]
@@ -97,13 +109,12 @@ async def scan_market():
 
             for key_id, entries in grouped.items():
                 i_id, quality = key_id.split("|")
-                
                 for e_from in entries:
                     city_from = e_from['city']
-                    if city_from == "Black Market": continue # На ЧР не можна купити
+                    if city_from == "Black Market": continue
                     
                     buy = e_from.get('sell_price_min', 0)
-                    if buy <= 100 or buy > MAX_BUY_PRICE: continue # Відсікаємо сміття
+                    if buy <= 100 or buy > MAX_BUY_PRICE: continue
                     bd = e_from.get('sell_price_min_date', "")
 
                     for e_to in entries:
@@ -117,9 +128,7 @@ async def scan_market():
                             sell = e_to.get('sell_price_min', 0)
                             sd = e_to.get('sell_price_min_date', "")
 
-                        # АНТИ-ФЕЙК ФІЛЬТР: 
-                        # 1. Ціна продажу не може бути меншою за покупку.
-                        # 2. Якщо ціна продажу в 10+ разів вища за покупку - це аномалія/скам.
+                        # Анти-фейк: не більше ніж в 10 разів дорожче
                         if sell <= buy or (sell / buy) > 10: continue
 
                         profit_prem = int((sell * 0.935) - buy)
@@ -133,20 +142,11 @@ async def scan_market():
 def get_item_name(item_id):
     base_id = item_id.split("@")[0]
     enchant = item_id.split("@")[1] if "@" in item_id else ""
-    tier = base_id.split("_")[0] if base_id.startswith("T") else ""
+    tier = base_id.split("_")[0].replace("T", "")
     if enchant: tier += f".{enchant}"
     item = items_data.get(base_id, {})
     name = item.get("LocalizedNames", {}).get("RU-RU", base_id)
     return f"[{tier}] {name}"
-
-def format_time(date_str):
-    if not date_str or date_str.startswith("0001"): return "???"
-    try:
-        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-        diff = datetime.now(UTC) - dt
-        mins = int(diff.total_seconds() / 60)
-        return f"{mins}м" if mins < 60 else f"{mins//60}г"
-    except: return "???"
 
 async def send_flips(results, message):
     results.sort(key=lambda x: x[6], reverse=True)
@@ -167,22 +167,22 @@ async def send_flips(results, message):
 
 @dp.message(F.text == "🔍 Пошук")
 async def scan_cmd(message: types.Message):
-    global scan_running
+    global scan_running, MAX_BUY_PRICE
     if MAX_BUY_PRICE <= 0:
         await message.answer("Встанови ліміт через кнопку!")
         return
     if scan_running: return
     scan_running = True
-    await message.answer(f"🔍 Шукаю на <b>EU</b> (до {MAX_BUY_PRICE:,})...", parse_mode=ParseMode.HTML)
+    await message.answer(f"🔍 Сканую <b>EU сервер</b> (до {MAX_BUY_PRICE:,})...", parse_mode=ParseMode.HTML)
     res = await scan_market()
-    if not res: await message.answer("Нічого свіжого.")
+    if not res: await message.answer("Нічого свіжого не знайшов.")
     else: await send_flips(res, message)
     scan_running = False
 
 @dp.message(Command("start"))
 @dp.message(F.text == "⚙️ Ліміт Скуп")
 async def set_limit(message: types.Message, state: FSMContext):
-    await message.answer("Введи ліміт ціни за 1 предмет:")
+    await message.answer("Введи ліміт ціни за 1 предмет:", reply_markup=ReplyKeyboardRemove())
     await state.set_state(LimitState.waiting_for_limit)
 
 @dp.message(LimitState.waiting_for_limit)
@@ -192,14 +192,14 @@ async def finish_limit(message: types.Message, state: FSMContext):
         MAX_BUY_PRICE = int(message.text.replace(" ",""))
         await state.clear()
         await message.answer(f"✅ Ліміт {MAX_BUY_PRICE:,} встановлено.", reply_markup=keyboard)
-    except: await message.answer("Введи число!")
+    except: await message.answer("Введи тільки цифри!")
 
 @dp.message(F.text == "🔁 Перезапустити бота")
 async def restart(message: types.Message):
     await download_items()
     global items_data
     items_data = filter_items()
-    await message.answer("🔄 База EU оновлена!", reply_markup=keyboard)
+    await message.answer("🔄 Базу EU та таймери оновлено!", reply_markup=keyboard)
 
 async def main():
     await download_items()
