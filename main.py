@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, UTC
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.exceptions import TelegramConflictError
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -35,8 +35,8 @@ CITIES = ["Bridgewatch", "Martlock", "Lymhurst", "Thetford", "Caerleon", "Brecil
 
 QUALITY_NAMES = {1: "Обычное", 2: "Хорошее", 3: "Выдающееся", 4: "Отличное", 5: "Шедевр"}
 
-# Дефолтний ліміт при запуску бота (змінюється через ТГ)
-MAX_BUY_PRICE = 300000
+# Тепер стартуємо з нуля, щоб бот ОБОВ'ЯЗКОВО запитав ліміт у користувача
+MAX_BUY_PRICE = 0
 # ================================================
 
 items_data = {}
@@ -44,7 +44,6 @@ last_sent = {}
 last_cache_clear = datetime.now(UTC)
 scan_running = False
 
-# Створюємо стан для очікування вводу ліміту
 class LimitState(StatesGroup):
     waiting_for_limit = State()
 
@@ -227,7 +226,6 @@ async def scan_market():
                         profit_prem = int((sell * 0.935) - buy)
                         profit_norm = int((sell * 0.895) - buy)
 
-                        # Застосовуємо динамічний ліміт
                         if profit_prem >= 5000 and buy <= MAX_BUY_PRICE:
                             hash_key = f"{i_id}_{quality}_{city_from}_{city_to}_{sell}"
                             if hash_key not in last_sent:
@@ -259,13 +257,27 @@ async def send_flips(results, message):
     if len(results) > 30:
         await message.answer(f"⚠️ Знайдено ще {len(results) - 30} фліпів, але показано 30 найсвіжіших.")
 
+@dp.message(Command("start"))
+async def start_cmd(message: types.Message, state: FSMContext):
+    await message.answer(
+        "👋 Привіт! Бот для пошуку фліпів запущено.\n\n"
+        "💰 Щоб не пропонувати тобі занадто дорогі предмети, давай одразу встановимо <b>максимальну суму покупки за 1 предмет</b>.\n\n"
+        "Введи свій ліміт цифрами (наприклад: 300000 або 1 000 000):",
+        parse_mode=ParseMode.HTML,
+        reply_markup=ReplyKeyboardRemove()
+    )
+    await state.set_state(LimitState.waiting_for_limit)
+
 @dp.message(F.text == "⚙️ Ліміт Скуп")
 async def set_limit_start(message: types.Message, state: FSMContext):
     global MAX_BUY_PRICE
+    curr_limit = f"<b>{MAX_BUY_PRICE:,}</b> срібла." if MAX_BUY_PRICE > 0 else "ще не встановлено."
+    
     await message.answer(
-        f"Поточний ліміт: <b>{MAX_BUY_PRICE:,}</b> срібла.\n\n"
-        f"Введи нову максимальну суму покупки цифрами (наприклад: 500000):",
-        parse_mode=ParseMode.HTML
+        f"Поточний ліміт: {curr_limit}\n\n"
+        f"Введи нову максимальну суму покупки за 1 предмет цифрами (наприклад: 500000):",
+        parse_mode=ParseMode.HTML,
+        reply_markup=ReplyKeyboardRemove()
     )
     await state.set_state(LimitState.waiting_for_limit)
 
@@ -273,7 +285,6 @@ async def set_limit_start(message: types.Message, state: FSMContext):
 async def set_limit_finish(message: types.Message, state: FSMContext):
     global MAX_BUY_PRICE
     
-    # Видаляємо пробіли, коми чи крапки, щоб бот не збоїв від "500 000" або "500.000"
     raw_text = message.text.replace(" ", "").replace(",", "").replace(".", "")
     
     if not raw_text.isdigit():
@@ -284,17 +295,25 @@ async def set_limit_finish(message: types.Message, state: FSMContext):
     await state.clear()
     
     await message.answer(
-        f"✅ Готово! Новий ліміт на покупку встановлено: <b>{MAX_BUY_PRICE:,}</b> срібла.",
+        f"✅ Готово! Максимальна сума покупки за 1 предмет встановлена: <b>{MAX_BUY_PRICE:,}</b> срібла.\n\n"
+        f"Тепер можеш сканувати ринок!",
         parse_mode=ParseMode.HTML,
         reply_markup=keyboard
     )
 
 @dp.message(Command("scan"))
-async def scan_cmd(message: types.Message):
-    global scan_running
+async def scan_cmd(message: types.Message, state: FSMContext):
+    global scan_running, MAX_BUY_PRICE
+    
+    # Якщо ліміт ще не встановлено (наприклад, після перезапуску бота)
+    if MAX_BUY_PRICE <= 0:
+        await start_cmd(message, state)
+        return
+
     if scan_running:
         await message.answer("⏳ Сканування вже виконується…")
         return
+        
     scan_running = True
     await message.answer(f"⏳ Сканую ринок (ліміт до {MAX_BUY_PRICE:,} ср.)...")
     results = await scan_market()
@@ -302,47 +321,4 @@ async def scan_cmd(message: types.Message):
         await message.answer("Немає нових свіжих фліпів у межах бюджету.")
     else:
         await send_flips(results, message)
-    scan_running = False
-
-@dp.message(Command("start"))
-async def start_cmd(message: types.Message):
-    await message.answer("Бот запущено. Використовуй /scan або кнопки нижче.", reply_markup=keyboard)
-
-@dp.message(lambda m: m.text == "🔄 Оновити зараз")
-async def refresh_cmd(message: types.Message):
-    await scan_cmd(message)
-
-@dp.message(lambda m: m.text == "🔁 Перезапустити бота")
-async def restart_cmd(message: types.Message):
-    global last_sent, last_cache_clear
-    last_sent.clear()
-    last_cache_clear = datetime.now(UTC)
-    await message.answer("♻️ Перезапускаю бота і завантажую свіжі предмети...")
-    await download_items()
-    global items_data
-    items_data = filter_items()
-    await message.answer("✅ Готово! Натисни '🔄 Оновити зараз' або /scan")
-
-async def main():
-    await asyncio.sleep(2)
-    await bot.delete_webhook(drop_pending_updates=True) 
-    
-    await download_items()
-    global items_data
-    items_data = filter_items()
-    
-    print("🚀 Підключення до Telegram...")
-    
-    while True:
-        try:
-            await dp.start_polling(bot)
-            break
-        except TelegramConflictError:
-            print("⚠️ Конфлікт підключення: стара копія бота ще працює. Чекаємо...")
-            await asyncio.sleep(10)
-        except Exception as e:
-            print(f"❌ Помилка: {e}")
-            await asyncio.sleep(10)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    scan
