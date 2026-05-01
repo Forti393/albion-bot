@@ -7,6 +7,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.exceptions import TelegramConflictError
 
 print("ФАЙЛ ЗАПУЩЕНО:", __file__)
 
@@ -116,7 +117,6 @@ def format_time_ago(date_str):
         return "Невідомо"
     try:
         dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-        # Якщо час прийшов без часової зони, примусово вважаємо його UTC
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=UTC)
             
@@ -209,6 +209,9 @@ async def scan_market():
 
     cities_str = ",".join(CITIES)
     chunk_size = 50
+    
+    # 💰 Твій ліміт по грошах для покупки:
+    MAX_BUY_PRICE = 300000
 
     async with aiohttp.ClientSession() as session:
         for i in range(0, total_items, chunk_size):
@@ -266,7 +269,8 @@ async def scan_market():
                         profit_prem = int((sell * 0.935) - buy)
                         profit_norm = int((sell * 0.895) - buy)
 
-                        if profit_prem >= 5000:
+                        # Додали фільтр ціни покупки: buy <= MAX_BUY_PRICE
+                        if profit_prem >= 5000 and buy <= MAX_BUY_PRICE:
                             hash_key = f"{i_id}_{quality}_{city_from}_{city_to}_{sell}"
                             if hash_key not in last_sent:
                                 real_count += 1
@@ -277,7 +281,16 @@ async def scan_market():
 
 async def send_flips(results, message):
     global last_sent
-    results.sort(key=lambda x: x[6], reverse=True)
+    
+    # Функція для безпечного отримання дати для сортування
+    def get_safe_date(d_str):
+        if not d_str or d_str.startswith("0001"):
+            return "1970-01-01T00:00:00"
+        return d_str
+
+    # Сортуємо спочатку за найсвіжішим часом (беремо найстарішу дату з пари buy/sell), 
+    # а потім за прибутком
+    results.sort(key=lambda x: (min(get_safe_date(x[8]), get_safe_date(x[9])), x[6]), reverse=True)
     
     for item_id, quality, city_from, city_to, buy, sell, profit_prem, profit_norm, bd, sd in results[:30]:
         item_name = get_item_name(item_id)
@@ -297,7 +310,7 @@ async def send_flips(results, message):
         )
     
     if len(results) > 30:
-        await message.answer(f"⚠️ Знайдено ще {len(results) - 30} фліпів, але показано 30 найприбутковіших.")
+        await message.answer(f"⚠️ Знайдено ще {len(results) - 30} фліпів, але показано 30 найсвіжіших.")
 
 @dp.message(Command("scan"))
 async def scan_cmd(message: types.Message):
@@ -309,7 +322,7 @@ async def scan_cmd(message: types.Message):
     await message.answer("⏳ Сканую ринок (це займе близько хвилини)...")
     results = await scan_market()
     if not results:
-        await message.answer("Немає нових свіжих фліпів з профітом > 5000.")
+        await message.answer("Немає нових свіжих фліпів у межах бюджету.")
     else:
         await send_flips(results, message)
     scan_running = False
@@ -333,9 +346,7 @@ async def restart_cmd(message: types.Message):
     await message.answer("✅ Готово! Натисни '🔄 Оновити зараз' або /scan")
 
 async def main():
-    print("⏳ Очікування 10 секунд перед стартом (уникнення конфлікту з попередньою версією)...")
-    await asyncio.sleep(10)
-    
+    await asyncio.sleep(2)
     await bot.delete_webhook(drop_pending_updates=True) 
     
     await download_items()
@@ -343,7 +354,18 @@ async def main():
     items_data = filter_items()
     
     print("🚀 Підключення до Telegram...")
-    await dp.start_polling(bot)
+    
+    while True:
+        try:
+            await dp.start_polling(bot)
+            break
+        except TelegramConflictError:
+            print("⚠️ Конфлікт підключення: стара копія бота ще працює.")
+            print("⏳ Чекаємо 10 секунд, поки Railway її вб'є, і пробуємо знову...")
+            await asyncio.sleep(10)
+        except Exception as e:
+            print(f"❌ Сталася інша помилка при підключенні: {e}")
+            await asyncio.sleep(10)
 
 if __name__ == "__main__":
     asyncio.run(main())
