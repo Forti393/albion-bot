@@ -146,7 +146,7 @@ async def scan_logic(from_city=None, to_city=None):
                             })
     return results
 
-# ================= ОБРОБНИКИ КНОПОК (ПРІОРИТЕТ) =================
+# ================= ОБРОБНИКИ ГОЛОВНИХ КНОПОК =================
 @dp.message(F.text == "🔍 Пошук")
 async def main_search(message: types.Message, state: FSMContext):
     await state.clear() 
@@ -170,7 +170,13 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await message.answer("💰 Вкажи макс. ціну покупки за 1 предмет:", reply_markup=ReplyKeyboardRemove())
     await state.set_state(BotState.waiting_for_limit)
 
-# ================= ОБРОБНИК ВВОДУ (ПІСЛЯ КНОПОК) =================
+@dp.message(F.text == "🧮 Калькулятор")
+async def calc_init(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("🔢 Калькулятор. Введи ціну КУПІВЛІ:", reply_markup=ReplyKeyboardRemove())
+    await state.set_state(BotState.calc_buy)
+
+# ================= ОБРОБНИКИ ВВОДУ ЦИФР =================
 @dp.message(BotState.waiting_for_limit)
 async def handle_limit_input(message: types.Message, state: FSMContext):
     text = message.text.replace(" ","").replace(",","")
@@ -180,7 +186,42 @@ async def handle_limit_input(message: types.Message, state: FSMContext):
         await state.clear()
         await message.answer(f"✅ Ліміт {max_buy_limit:,} збережено. Обери режим:", reply_markup=get_mode_inline())
     else:
-        await message.answer("❌ Будь ласка, введіть число (або натисніть кнопку в меню ще раз).")
+        await state.clear() # Якщо помилка - скидаємо, щоб кнопки працювали
+
+@dp.message(BotState.calc_buy)
+async def calc_b(message: types.Message, state: FSMContext):
+    text = message.text.replace(" ","").replace(",","")
+    if text.isdigit():
+        val = int(text)
+        await state.update_data(b=val)
+        await message.answer(f"✅ Купівля: {val:,}\n📤 Тепер введи ціну ПРОДАЖУ:")
+        await state.set_state(BotState.calc_sell)
+    else:
+        await message.answer("❌ Введи число!")
+
+@dp.message(BotState.calc_sell)
+async def calc_s(message: types.Message, state: FSMContext):
+    text = message.text.replace(" ","").replace(",","")
+    if text.isdigit():
+        data = await state.get_data()
+        buy = data.get('b')
+        sell = int(text)
+        if buy is None:
+            await message.answer("Помилка даних. Почни спочатку.", reply_markup=get_main_kb())
+            await state.clear()
+            return
+        
+        p_p, p_n = int(sell * 0.935 - buy), int(sell * 0.895 - buy)
+        await message.answer(
+            f"📊 <b>Результат:</b>\n"
+            f"👑 П: <b>{p_p:,}</b>\n"
+            f"💀 Б: <b>{p_n:,}</b>", 
+            reply_markup=get_main_kb(), 
+            parse_mode=ParseMode.HTML
+        )
+        await state.clear()
+    else:
+        await message.answer("❌ Введи число продажу!")
 
 # ================= РЕЖИМИ ТА ІНШЕ =================
 @dp.callback_query(F.data.startswith("set_mode_"))
@@ -226,31 +267,6 @@ async def to_city(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.answer("Завершено.", reply_markup=get_main_kb())
     await callback.answer()
-
-@dp.message(F.text == "🧮 Калькулятор")
-async def calc_init(message: types.Message, state: FSMContext):
-    await message.answer("🔢 Введи ціну КУПІВЛІ:", reply_markup=ReplyKeyboardRemove())
-    await state.set_state(BotState.calc_buy)
-
-@dp.message(BotState.calc_buy)
-async def calc_b(message: types.Message, state: FSMContext):
-    text = message.text.replace(" ","")
-    if text.isdigit():
-        val = int(text)
-        await state.update_data(b=val)
-        await message.answer(f"✅ Купівля: {val:,}\n📤 Введи ціну ПРОДАЖУ:")
-        await state.set_state(BotState.calc_sell)
-    else:
-        await message.answer("Введіть число!")
-
-@dp.message(BotState.calc_sell)
-async def calc_s(message: types.Message, state: FSMContext):
-    text = message.text.replace(" ","")
-    if text.isdigit():
-        data = await state.get_data()
-        b, s = data['b'], int(text)
-        await message.answer(f"📊 П: <b>{int(s*0.935-b):,}</b> | Б: <b>{int(s*0.895-b):,}</b>", reply_markup=get_main_kb(), parse_mode=ParseMode.HTML)
-        await state.clear()
 
 async def display_results(message, res):
     if not res:
