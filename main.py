@@ -63,7 +63,7 @@ def get_city_inline():
     buttons = [[InlineKeyboardButton(text=f"{CITY_EMOJIS[c]} {c}", callback_data=f"city_{c}")] for c in CITIES if c != "Black Market"]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# ================= ЛОГІКА СКАНУВАННЯ =================
+# ================= ЛОГІКА =================
 async def download_items():
     global items_data
     async with aiohttp.ClientSession() as session:
@@ -145,32 +145,24 @@ async def cmd_start(message: types.Message, state: FSMContext):
 
 @dp.message(F.text == "🔍 Пошук")
 async def main_search(message: types.Message, state: FSMContext):
-    # ПРИМУСОВО ВИХОДИМО ЗІ СТАНУ ЛІМІТУ, ЯКЩО НАТИСНУТА КНОПКА
-    current_state = await state.get_state()
-    if current_state == BotState.waiting_for_limit:
-        if max_buy_limit > 0:
-            await state.clear()
-        else:
-            await message.answer("Будь ласка, спочатку введи число ліміту!")
-            return
-
-    if max_buy_limit > 0:
-        if current_mode == "all":
-            await message.answer(f"🔍 Сканую (Всі міста, до {max_buy_limit:,})...", reply_markup=get_main_kb())
-            res = await scan_logic()
-            await display_results(message, res)
-        else:
-            # РЕЖИМ ШЛЯХ - ЗАВЖДИ КИДАЄМО ВИБІР МІСТ
-            await message.answer("📍 Режим Шлях. Звідки веземо?", reply_markup=get_city_inline())
-            await state.set_state(BotState.picking_from)
-    else:
+    await state.clear() # ПРИМУСОВО ВИХОДИМО З УСІХ СТАНІВ ПРИ НАТИСКАННІ ПОШУКУ
+    if max_buy_limit <= 0:
         await cmd_start(message, state)
+        return
+
+    if current_mode == "all":
+        await message.answer(f"🔍 Сканую (Всі міста, до {max_buy_limit:,})...", reply_markup=get_main_kb())
+        res = await scan_logic()
+        await display_results(message, res)
+    else:
+        await message.answer("📍 Режим Шлях. Звідки веземо?", reply_markup=get_city_inline())
+        await state.set_state(BotState.picking_from)
 
 @dp.message(BotState.waiting_for_limit)
 async def handle_limit_input(message: types.Message, state: FSMContext):
-    # Якщо прийшов текст кнопки замість числа - ігноруємо обробку як числа
-    if message.text == "🔍 Пошук" or message.text == "⚙️ Ліміт" or "Режими" in message.text:
-        return 
+    # Якщо прийшов текст будь-якої кнопки — це не ліміт, ігноруємо
+    if message.text in ["🔍 Пошук", "⚙️ Ліміт", "🧮 Калькулятор", "🔁 Оновити базу"] or "Режими" in message.text or "Екстра" in message.text:
+        return
 
     text = message.text.replace(" ","").replace(",","")
     if text.isdigit():
@@ -190,7 +182,6 @@ async def set_mode(callback: types.CallbackQuery, state: FSMContext):
         res = await scan_logic()
         await display_results(callback.message, res)
     else:
-        # ПРИ ВИБОРІ РЕЖИМУ ШЛЯХ - ОДРАЗУ ПИТАЄМО МІСТО
         await callback.message.answer("📍 Звідки веземо?", reply_markup=get_city_inline())
         await state.set_state(BotState.picking_from)
     await callback.answer()
@@ -205,7 +196,6 @@ async def toggle_extra(message: types.Message):
     extra_filter_active = not extra_filter_active
     await message.answer(f"⚡ Фільтр 10хв: {'УВІМКНЕНО' if extra_filter_active else 'ВИМКНЕНО'}", reply_markup=get_main_kb())
 
-# --- ВИБІР ШЛЯХУ ---
 @dp.callback_query(BotState.picking_from)
 async def from_city(callback: types.CallbackQuery, state: FSMContext):
     city = callback.data.split("_")[1]
@@ -222,10 +212,8 @@ async def to_city(callback: types.CallbackQuery, state: FSMContext):
     res = await scan_logic(f_c, t_c)
     await display_results(callback.message, res)
     await state.clear()
-    await callback.message.answer("Меню:", reply_markup=get_main_kb())
     await callback.answer()
 
-# --- КАЛЬКУЛЯТОР ---
 @dp.message(F.text == "🧮 Калькулятор")
 async def calc_init(message: types.Message, state: FSMContext):
     await message.answer("Введи ціну КУПІВЛІ:", reply_markup=ReplyKeyboardRemove())
@@ -252,8 +240,7 @@ async def display_results(message, res):
         return
     res.sort(key=lambda x: (max(get_dt(x['bd']), get_dt(x['sd'])), x['profit']), reverse=True)
     for r in res[:15]:
-        name_data = items_data.get(r['id'].split("@")[0], {})
-        name = name_data.get("LocalizedNames", {}).get("RU-RU", r['id'])
+        name = items_data.get(r['id'].split("@")[0], {}).get("LocalizedNames", {}).get("RU-RU", r['id'])
         await message.answer(
             f"📦 <b>{name}</b> ({QUALITY_NAMES[r['q']]})\n"
             f"{CITY_EMOJIS[r['from']]} {r['from']} ➔ {CITY_EMOJIS[r['to']]} <b>{r['to']}</b>\n"
