@@ -12,9 +12,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 # ================= НАЛАШТУВАННЯ =================
-# Пріоритет на Європу для точних цін
 MARKET_BASE_URLS = [
-    "https://europe.albion-online-data.com", # Твій сервер
+    "https://europe.albion-online-data.com", # Твій сервер (EU)
     "https://www.albion-online-data.com",
 ]
 
@@ -38,7 +37,6 @@ dp = Dispatcher()
 
 items_data = {}
 last_sent = {}
-last_cache_clear = datetime.now(UTC)
 scan_running = False
 
 class LimitState(StatesGroup):
@@ -60,11 +58,11 @@ async def download_items():
             items_data = {item["UniqueName"]: item for item in json.loads(text)}
 
 def filter_items():
-    allowed_keywords = ["weapon", "armor", "plate", "leather", "cloth", "melee", "ranged", "magic", "off", "shield", "torch", "book", "bag", "cape", "potion", "meal", "mount", "relic", "artefact"]
+    allowed = ["weapon", "armor", "plate", "leather", "cloth", "bag", "cape", "potion", "meal", "mount", "relic", "artefact", "tool"]
     filtered = {}
     for item_id, item in items_data.items():
         if not item_id or not item_id.startswith(("T4_", "T5_", "T6_", "T7_", "T8_")): continue
-        if any(key in item_id.lower() for key in allowed_keywords):
+        if any(key in item_id.lower() for key in allowed):
             filtered[item_id] = item
     return filtered
 
@@ -80,14 +78,10 @@ async def fetch_prices(session, items_chunk_str, cities_str):
     return None
 
 async def scan_market():
-    global last_sent, last_cache_clear
+    global last_sent, MAX_BUY_PRICE
     results = []
     item_ids = list(items_data.keys())
     
-    if (datetime.now(UTC) - last_cache_clear) > timedelta(hours=12):
-        last_sent.clear()
-        last_cache_clear = datetime.now(UTC)
-
     cities_str = ",".join(CITIES)
     async with aiohttp.ClientSession() as session:
         for i in range(0, len(item_ids), 50):
@@ -106,26 +100,27 @@ async def scan_market():
                 
                 for e_from in entries:
                     city_from = e_from['city']
-                    # Видаляємо помилку: З Чорного ринку купувати НЕ МОЖНА
-                    if city_from == "Black Market": continue 
+                    if city_from == "Black Market": continue # На ЧР не можна купити
                     
                     buy = e_from.get('sell_price_min', 0)
-                    if buy <= 0 or buy > MAX_BUY_PRICE: continue
+                    if buy <= 100 or buy > MAX_BUY_PRICE: continue # Відсікаємо сміття
                     bd = e_from.get('sell_price_min_date', "")
 
                     for e_to in entries:
                         city_to = e_to['city']
                         if city_from == city_to: continue
 
-                        # Спеціальна логіка для Чорного ринку (тільки продаж)
                         if city_to == "Black Market":
-                            sell = e_to.get('buy_price_max', 0) # Ціна миттєвого викупу системою
+                            sell = e_to.get('buy_price_max', 0)
                             sd = e_to.get('buy_price_max_date', "")
                         else:
                             sell = e_to.get('sell_price_min', 0)
                             sd = e_to.get('sell_price_min_date', "")
 
-                        if sell <= buy: continue
+                        # АНТИ-ФЕЙК ФІЛЬТР: 
+                        # 1. Ціна продажу не може бути меншою за покупку.
+                        # 2. Якщо ціна продажу в 10+ разів вища за покупку - це аномалія/скам.
+                        if sell <= buy or (sell / buy) > 10: continue
 
                         profit_prem = int((sell * 0.935) - buy)
                         if profit_prem > 5000:
@@ -144,6 +139,15 @@ def get_item_name(item_id):
     name = item.get("LocalizedNames", {}).get("RU-RU", base_id)
     return f"[{tier}] {name}"
 
+def format_time(date_str):
+    if not date_str or date_str.startswith("0001"): return "???"
+    try:
+        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        diff = datetime.now(UTC) - dt
+        mins = int(diff.total_seconds() / 60)
+        return f"{mins}м" if mins < 60 else f"{mins//60}г"
+    except: return "???"
+
 async def send_flips(results, message):
     results.sort(key=lambda x: x[6], reverse=True)
     for r in results[:20]:
@@ -155,8 +159,8 @@ async def send_flips(results, message):
         await message.answer(
             f"📦 <b>{name}</b> ({q})\n"
             f"{f_e} {r[2]} ➔ {t_e} <b>{r[3]}</b>\n"
-            f"💰 Купити: <b>{r[4]:,}</b>\n"
-            f"💸 Продати: <b>{r[5]:,}</b>\n"
+            f"💰 Купити: <b>{r[4]:,}</b> (⏳{format_time(r[7])})\n"
+            f"💸 Продати: <b>{r[5]:,}</b> (⏳{format_time(r[8])})\n"
             f"👑 Прибуток: <b>{r[6]:,}</b>",
             parse_mode=ParseMode.HTML
         )
@@ -165,22 +169,20 @@ async def send_flips(results, message):
 async def scan_cmd(message: types.Message):
     global scan_running
     if MAX_BUY_PRICE <= 0:
-        await message.answer("Спочатку встанови ліміт скупку!")
+        await message.answer("Встанови ліміт через кнопку!")
         return
-    if scan_running:
-        await message.answer("Пошук триває...")
-        return
+    if scan_running: return
     scan_running = True
-    await message.answer("🔍 Шукаю фліпи на <b>EU сервере</b>...", parse_mode=ParseMode.HTML)
+    await message.answer(f"🔍 Шукаю на <b>EU</b> (до {MAX_BUY_PRICE:,})...", parse_mode=ParseMode.HTML)
     res = await scan_market()
-    if not res: await message.answer("Нічого не знайдено.")
+    if not res: await message.answer("Нічого свіжого.")
     else: await send_flips(res, message)
     scan_running = False
 
 @dp.message(Command("start"))
 @dp.message(F.text == "⚙️ Ліміт Скуп")
 async def set_limit(message: types.Message, state: FSMContext):
-    await message.answer("Введи ліміт срібла на 1 предмет:")
+    await message.answer("Введи ліміт ціни за 1 предмет:")
     await state.set_state(LimitState.waiting_for_limit)
 
 @dp.message(LimitState.waiting_for_limit)
@@ -197,7 +199,7 @@ async def restart(message: types.Message):
     await download_items()
     global items_data
     items_data = filter_items()
-    await message.answer("🔄 Базу оновлено для Європи!", reply_markup=keyboard)
+    await message.answer("🔄 База EU оновлена!", reply_markup=keyboard)
 
 async def main():
     await download_items()
