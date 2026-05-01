@@ -37,14 +37,18 @@ bot = Bot(token=os.environ.get("BOT_TOKEN"))
 dp = Dispatcher()
 items_data = {}
 max_buy_limit = 0
-extra_filter_active = False # Стан фільтру "Екстра"
+extra_filter_active = False 
+current_mode = "all" # "all" або "custom"
 
 # ================= КЛАВІАТУРИ =================
 def get_main_kb():
-    extra_text = "🚫 Екстра відміна" if extra_filter_active else "⚡ Екстра тестування"
+    mode_text = "Всі" if current_mode == "all" else "Шлях"
+    extra_btn_text = "🚫 Екстра відміна" if extra_filter_active else "⚡ Екстра тестування"
+    
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🗺️ Режими"), KeyboardButton(text=extra_text)],
+            [KeyboardButton(text="🔍 Пошук")],
+            [KeyboardButton(text=f"🗺️ Режими ({mode_text})"), KeyboardButton(text=extra_btn_text)],
             [KeyboardButton(text="🧮 Калькулятор"), KeyboardButton(text="⚙️ Ліміт")],
             [KeyboardButton(text="🔁 Оновити базу")]
         ],
@@ -53,15 +57,12 @@ def get_main_kb():
 
 def get_mode_inline():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎲 Рандом міста (Всі)", callback_data="mode_all")],
-        [InlineKeyboardButton(text="📍 На вибір (Шлях)", callback_data="mode_custom")]
+        [InlineKeyboardButton(text="🎲 Рандом міста (Всі)", callback_data="set_mode_all")],
+        [InlineKeyboardButton(text="📍 На вибір (Шлях)", callback_data="set_mode_custom")]
     ])
 
 def get_city_inline():
-    buttons = []
-    for c in CITIES:
-        if c != "Black Market":
-            buttons.append([InlineKeyboardButton(text=f"{CITY_EMOJIS[c]} {c}", callback_data=f"city_{c}")])
+    buttons = [[InlineKeyboardButton(text=f"{CITY_EMOJIS[c]} {c}", callback_data=f"city_{c}")] for c in CITIES if c != "Black Market"]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 # ================= ДОПОМІЖНІ ФУНКЦІЇ =================
@@ -93,8 +94,6 @@ async def scan_logic(from_city=None, to_city=None):
     results = []
     item_list = list(filter_items().keys())
     search_cities = [from_city, to_city] if from_city and to_city else CITIES
-    
-    # Авто-порівняння для Карлеону
     if to_city == "Caerleon" and "Black Market" not in search_cities:
         search_cities.append("Black Market")
 
@@ -121,20 +120,17 @@ async def scan_logic(from_city=None, to_city=None):
                     buy = city_data[f_city].get('sell_price_min', 0)
                     if buy <= 100 or buy > max_buy_limit: continue
                     
-                    # Екстра-фільтр часу для купівлі
                     bd_dt = get_dt(city_data[f_city]['sell_price_min_date'])
                     if extra_filter_active and (now - bd_dt) > timedelta(minutes=10): continue
 
                     targets = [to_city] if to_city else [c for c in city_data if c != f_city]
                     for t_city in targets:
                         if t_city not in city_data: continue
-                        
                         sell = city_data[t_city].get('buy_price_max' if t_city == "Black Market" else 'sell_price_min', 0)
                         if sell <= buy or (sell/buy) > 10: continue
                         
-                        # Екстра-фільтр часу для продажу
-                        sd_date_key = 'buy_price_max_date' if t_city == "Black Market" else 'sell_price_min_date'
-                        sd_dt = get_dt(city_data[t_city].get(sd_date_key))
+                        sd_key = 'buy_price_max_date' if t_city == "Black Market" else 'sell_price_min_date'
+                        sd_dt = get_dt(city_data[t_city].get(sd_key))
                         if extra_filter_active and (now - sd_dt) > timedelta(minutes=10): continue
 
                         extra_info = ""
@@ -148,15 +144,15 @@ async def scan_logic(from_city=None, to_city=None):
                                 'id': i_id, 'q': int(qual), 'from': f_city, 'to': t_city,
                                 'buy': buy, 'sell': sell, 'profit': profit,
                                 'bd': city_data[f_city]['sell_price_min_date'],
-                                'sd': city_data[t_city].get(sd_date_key),
+                                'sd': city_data[t_city].get(sd_key),
                                 'extra': extra_info
                             })
     return results
 
-# ================= ОБРОБНИКИ КОМАНД =================
+# ================= ОБРОБНИКИ =================
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
-    await message.answer("👋 Привіт! Встанови ліміт срібла на 1 предмет:", reply_markup=ReplyKeyboardRemove())
+    await message.answer("👋 Встанови ліміт срібла на 1 предмет:", reply_markup=ReplyKeyboardRemove())
     await state.set_state(BotState.waiting_for_limit)
 
 @dp.message(BotState.waiting_for_limit)
@@ -165,35 +161,49 @@ async def set_limit(message: types.Message, state: FSMContext):
     if message.text.isdigit():
         max_buy_limit = int(message.text)
         await message.answer(f"✅ Ліміт {max_buy_limit:,} встановлено.\nОбери режим пошуку:", reply_markup=get_mode_inline())
-        # Клавіатуру поки не виводимо, вона з'явиться після вибору режиму або скасування
     else:
-        await message.answer("Будь ласка, введи число.")
+        await message.answer("Введи тільки число.")
 
-@dp.callback_query(F.data == "mode_all")
-async def mode_all_handler(callback: types.CallbackQuery):
-    await callback.message.answer("Режим: Рандом міста. Запускаю пошук...", reply_markup=get_main_kb())
-    res = await scan_logic()
-    await display_results(callback.message, res)
+@dp.callback_query(F.data.startswith("set_mode_"))
+async def set_mode_handler(callback: types.CallbackQuery, state: FSMContext):
+    global current_mode
+    mode = callback.data.split("_")[2]
+    current_mode = mode
+    
+    if mode == "all":
+        await callback.message.answer("✅ Режим 'Всі міста' активовано. Починаю пошук...", reply_markup=get_main_kb())
+        res = await scan_logic()
+        await display_results(callback.message, res)
+    else:
+        await callback.message.edit_text("📍 Обрано режим 'Шлях'. Звідки веземо?", reply_markup=get_city_inline())
+        await state.set_state(BotState.picking_from)
     await callback.answer()
 
-@dp.callback_query(F.data == "mode_custom")
-async def mode_custom_handler(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("Звідки веземо?", reply_markup=get_city_inline())
-    await state.set_state(BotState.picking_from)
-    await callback.answer()
+@dp.message(F.text == "🔍 Пошук")
+async def main_search_handler(message: types.Message, state: FSMContext):
+    if max_buy_limit <= 0:
+        await cmd_start(message, state)
+        return
 
-@dp.message(F.text == "🗺️ Режими")
-async def show_modes(message: types.Message):
-    await message.answer("Обери режим пошуку:", reply_markup=get_mode_inline())
+    if current_mode == "all":
+        await message.answer(f"🔎 Шукаю (Всі міста, ліміт {max_buy_limit:,})...")
+        res = await scan_logic()
+        await display_results(message, res)
+    else:
+        await message.answer("📍 Режим Шлях. Звідки веземо?", reply_markup=get_city_inline())
+        await state.set_state(BotState.picking_from)
+
+@dp.message(F.text.startswith("🗺️ Режими"))
+async def change_mode_btn(message: types.Message):
+    await message.answer("Змінити режим пошуку:", reply_markup=get_mode_inline())
 
 @dp.message(F.text.contains("Екстра"))
 async def toggle_extra(message: types.Message):
     global extra_filter_active
     extra_filter_active = not extra_filter_active
-    status = "АКТИВОВАНО (фільтр 10хв)" if extra_filter_active else "ВИМКНЕНО"
-    await message.answer(f"⚡ Екстра тестування: {status}", reply_markup=get_main_kb())
+    await message.answer(f"⚡ Екстра фільтр: {'УВІМКНЕНО' if extra_filter_active else 'ВИМКНЕНО'}", reply_markup=get_main_kb())
 
-# ================= ЛОГІКА ВИБОРУ МІСТ =================
+# ================= ВИБІР МІСТ =================
 @dp.callback_query(BotState.picking_from)
 async def city_from_chosen(callback: types.CallbackQuery, state: FSMContext):
     city = callback.data.split("_")[1]
@@ -230,21 +240,16 @@ async def calc_sell_step(message: types.Message, state: FSMContext):
     if message.text.isdigit():
         data = await state.get_data()
         buy, sell = data['buy'], int(message.text)
-        p_tax = int(sell * 0.935 - buy)
-        n_tax = int(sell * 0.895 - buy)
+        p_tax, n_tax = int(sell * 0.935 - buy), int(sell * 0.895 - buy)
         await message.answer(
-            f"📊 <b>Розрахунок:</b>\n"
-            f"📥 Купівля: {buy:,}\n"
-            f"📤 Продаж: {sell:,}\n\n"
-            f"👑 З Премом (6.5%): <b>{p_tax:,}</b>\n"
-            f"💀 Без Према (10.5%): <b>{n_tax:,}</b>",
+            f"📊 <b>Результат:</b>\n👑 Прем: <b>{p_tax:,}</b>\n💀 Без: <b>{n_tax:,}</b>",
             parse_mode=ParseMode.HTML, reply_markup=get_main_kb()
         )
         await state.clear()
 
 async def display_results(message, res):
     if not res:
-        await message.answer("Нічого не знайдено (спробуй вимкнути Екстра режим або змінити міста).")
+        await message.answer("Нічого не знайдено.")
         return
     res.sort(key=lambda x: (max(get_dt(x['bd']), get_dt(x['sd'])), x['profit']), reverse=True)
     for r in res[:15]:
@@ -255,11 +260,9 @@ async def display_results(message, res):
             f"{CITY_EMOJIS[r['from']]} {r['from']} ➔ {CITY_EMOJIS[r['to']]} <b>{r['to']}</b>\n"
             f"💰 Купити: <b>{r['buy']:,}</b> (⏳{format_time(r['bd'])})\n"
             f"💸 Продати: <b>{r['sell']:,}</b> (⏳{format_time(r['sd'])})\n"
-            f"👑 Прибуток: <b>{profit_fmt(r['profit'])}</b>{r['extra']}",
+            f"👑 Прибуток: <b>{r['profit']:,}</b>{r['extra']}",
             parse_mode=ParseMode.HTML
         )
-
-def profit_fmt(val): return f"{val:,}"
 
 @dp.message(F.text == "⚙️ Ліміт")
 async def cmd_limit_reset(message: types.Message, state: FSMContext):
@@ -268,7 +271,7 @@ async def cmd_limit_reset(message: types.Message, state: FSMContext):
 @dp.message(F.text == "🔁 Оновити базу")
 async def refresh_base(message: types.Message):
     await download_items()
-    await message.answer("✅ Базу предметів оновлено!")
+    await message.answer("✅ Базу оновлено!")
 
 async def main():
     await download_items()
