@@ -19,7 +19,7 @@ CITIES = ["Bridgewatch", "Martlock", "Lymhurst", "Thetford", "Fort Sterling", "C
 CITY_EMOJIS = {
     "Lymhurst": "🟢", "Martlock": "🔵", "Caerleon": "⚫",
     "Thetford": "🟣", "Bridgewatch": "🟠", "Fort Sterling": "⚪",
-    "Brecilien": "🌸", "Black Market": "🚩🏴"
+    "Brecilien": "🌸", "Black Market": "💀"  # Замінено на череп
 }
 
 QUALITY_NAMES = {1: "Обычное", 2: "Хорошее", 3: "Выдающееся", 4: "Отличное", 5: "Шедевр"}
