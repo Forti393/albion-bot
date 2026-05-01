@@ -35,7 +35,7 @@ CITIES = ["Bridgewatch", "Martlock", "Lymhurst", "Thetford", "Caerleon", "Brecil
 
 QUALITY_NAMES = {1: "Обычное", 2: "Хорошее", 3: "Выдающееся", 4: "Отличное", 5: "Шедевр"}
 
-# Дефолтний ліміт при запуску бота (змінюється через ТГ)
+# Початковий ліміт (змінюється користувачем у боті)
 MAX_BUY_PRICE = 0
 # ================================================
 
@@ -47,9 +47,10 @@ scan_running = False
 class LimitState(StatesGroup):
     waiting_for_limit = State()
 
+# Оновлена клавіатура з кнопкою "🔍 Пошук"
 keyboard = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="🔄 Оновити зараз"), KeyboardButton(text="⚙️ Ліміт Скуп")],
+        [KeyboardButton(text="🔍 Пошук"), KeyboardButton(text="⚙️ Ліміт Скуп")],
         [KeyboardButton(text="🔁 Перезапустити бота")]
     ],
     resize_keyboard=True
@@ -226,7 +227,6 @@ async def scan_market():
                         profit_prem = int((sell * 0.935) - buy)
                         profit_norm = int((sell * 0.895) - buy)
 
-                        # Застосовуємо динамічний ліміт
                         if profit_prem >= 5000 and buy <= MAX_BUY_PRICE:
                             hash_key = f"{i_id}_{quality}_{city_from}_{city_to}_{sell}"
                             if hash_key not in last_sent:
@@ -262,7 +262,7 @@ async def send_flips(results, message):
 async def start_cmd(message: types.Message, state: FSMContext):
     await message.answer(
         "👋 Привіт! Бот для пошуку фліпів запущено.\n\n"
-        "💰 Щоб не пропонувати тобі занадто дорогі предмети, давай одразу встановимо <b>максимальну суму покупки за 1 предмет</b>.\n\n"
+        "💰 Щоб почати, встанови <b>максимальну суму покупки за 1 предмет</b>.\n\n"
         "Введи свій ліміт цифрами (наприклад: 300000 або 1 000 000):",
         parse_mode=ParseMode.HTML,
         reply_markup=ReplyKeyboardRemove()
@@ -276,7 +276,7 @@ async def set_limit_start(message: types.Message, state: FSMContext):
     
     await message.answer(
         f"Поточний ліміт: {curr_limit}\n\n"
-        f"Введи нову максимальну суму покупки за 1 предмет цифрами (наприклад: 500000):",
+        f"Введи нову суму покупки за 1 предмет цифрами:",
         parse_mode=ParseMode.HTML,
         reply_markup=ReplyKeyboardRemove()
     )
@@ -285,59 +285,55 @@ async def set_limit_start(message: types.Message, state: FSMContext):
 @dp.message(LimitState.waiting_for_limit)
 async def set_limit_finish(message: types.Message, state: FSMContext):
     global MAX_BUY_PRICE
-    
     raw_text = message.text.replace(" ", "").replace(",", "").replace(".", "")
     
     if not raw_text.isdigit():
-        await message.answer("❌ Будь ласка, введи тільки цифри (наприклад: 1000000). Спробуй ще раз:")
+        await message.answer("❌ Введи тільки цифри. Спробуй ще раз:")
         return
     
     MAX_BUY_PRICE = int(raw_text)
     await state.clear()
     
     await message.answer(
-        f"✅ Готово! Максимальна сума покупки за 1 предмет встановлена: <b>{MAX_BUY_PRICE:,}</b> срібла.\n\n"
-        f"Тепер можеш сканувати ринок!",
+        f"✅ Ліміт встановлено: <b>{MAX_BUY_PRICE:,}</b> срібла.\n\n"
+        f"Тепер можеш тиснути кнопку <b>🔍 Пошук</b>!",
         parse_mode=ParseMode.HTML,
         reply_markup=keyboard
     )
 
 @dp.message(Command("scan"))
+@dp.message(F.text == "🔍 Пошук") # Обробка нової назви кнопки
 async def scan_cmd(message: types.Message, state: FSMContext):
     global scan_running, MAX_BUY_PRICE
     
-    # Якщо ліміт ще не встановлено (наприклад, після перезапуску бота)
     if MAX_BUY_PRICE <= 0:
         await start_cmd(message, state)
         return
 
     if scan_running:
-        await message.answer("⏳ Сканування вже виконується…")
+        await message.answer("⏳ Пошук уже триває…")
         return
         
     scan_running = True
-    await message.answer(f"⏳ Сканую ринок (ліміт до {MAX_BUY_PRICE:,} ср.)...")
+    await message.answer(f"🔍 Шукаю фліпи (ліміт до {MAX_BUY_PRICE:,} ср.)...")
     results = await scan_market()
+    
     if not results:
-        await message.answer("Немає нових свіжих фліпів у межах бюджету.")
+        await message.answer("Нових свіжих фліпів у межах бюджету не знайдено.")
     else:
         await send_flips(results, message)
     scan_running = False
-
-@dp.message(lambda m: m.text == "🔄 Оновити зараз")
-async def refresh_cmd(message: types.Message, state: FSMContext):
-    await scan_cmd(message, state)
 
 @dp.message(lambda m: m.text == "🔁 Перезапустити бота")
 async def restart_cmd(message: types.Message):
     global last_sent, last_cache_clear
     last_sent.clear()
     last_cache_clear = datetime.now(UTC)
-    await message.answer("♻️ Перезапускаю бота і завантажую свіжі предмети...", reply_markup=keyboard)
+    await message.answer("♻️ Перезапускаю бота і завантажую предмети...", reply_markup=keyboard)
     await download_items()
     global items_data
     items_data = filter_items()
-    await message.answer("✅ Готово! Натисни '🔄 Оновити зараз' або /scan")
+    await message.answer("✅ Готово! Натисни <b>🔍 Пошук</b>", parse_mode=ParseMode.HTML)
 
 async def main():
     await asyncio.sleep(2)
@@ -354,7 +350,7 @@ async def main():
             await dp.start_polling(bot)
             break
         except TelegramConflictError:
-            print("⚠️ Конфлікт підключення: стара копія бота ще працює. Чекаємо...")
+            print("⚠️ Конфлікт підключення: стара копія ще працює. Чекаємо...")
             await asyncio.sleep(10)
         except Exception as e:
             print(f"❌ Помилка: {e}")
