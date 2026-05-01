@@ -11,7 +11,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 # ================= НАЛАШТУВАННЯ =================
-# Тільки одне джерело — Європа
 MARKET_BASE_URL = "https://europe.albion-online-data.com"
 MARKET_PATH = "/api/v2/stats/prices/{}?locations={}"
 ITEMS_URL = "https://raw.githubusercontent.com/ao-data/ao-bin-dumps/master/formatted/items.json"
@@ -68,26 +67,29 @@ async def fetch_prices(session, items_chunk_str, cities_str):
         async with session.get(url, timeout=10) as resp:
             if resp.status == 200:
                 return await resp.json()
-    except:
-        return None
+    except: return None
     return None
+
+def get_dt(date_str):
+    """Допоміжна функція для перетворення рядка дати в об'єкт datetime."""
+    if not date_str or date_str.startswith("0001"):
+        return datetime(1970, 1, 1, tzinfo=UTC)
+    try:
+        clean_date = date_str.split(".")[0].replace("Z", "")
+        return datetime.fromisoformat(clean_date).replace(tzinfo=UTC)
+    except:
+        return datetime(1970, 1, 1, tzinfo=UTC)
 
 def format_time(date_str):
     if not date_str or date_str.startswith("0001"): return "???"
-    try:
-        # Albion Data надсилає час у форматі ISO 8601 без Z або з ним
-        clean_date = date_str.split(".")[0].replace("Z", "")
-        dt = datetime.fromisoformat(clean_date).replace(tzinfo=UTC)
-        now = datetime.now(UTC)
-        diff = now - dt
-        
-        total_mins = int(diff.total_seconds() / 60)
-        if total_mins < 0: return "зараз"
-        if total_mins < 60: return f"{total_mins}м"
-        if total_mins < 1440: return f"{total_mins//60}г"
-        return f"{total_mins//1440}д"
-    except:
-        return "???"
+    dt = get_dt(date_str)
+    if dt.year == 1970: return "???"
+    diff = datetime.now(UTC) - dt
+    total_mins = int(diff.total_seconds() / 60)
+    if total_mins < 0: return "зараз"
+    if total_mins < 60: return f"{total_mins}м"
+    if total_mins < 1440: return f"{total_mins//60}г"
+    return f"{total_mins//1440}д"
 
 async def scan_market():
     global last_sent, MAX_BUY_PRICE
@@ -128,7 +130,6 @@ async def scan_market():
                             sell = e_to.get('sell_price_min', 0)
                             sd = e_to.get('sell_price_min_date', "")
 
-                        # Анти-фейк: не більше ніж в 10 разів дорожче
                         if sell <= buy or (sell / buy) > 10: continue
 
                         profit_prem = int((sell * 0.935) - buy)
@@ -149,7 +150,9 @@ def get_item_name(item_id):
     return f"[{tier}] {name}"
 
 async def send_flips(results, message):
-    results.sort(key=lambda x: x[6], reverse=True)
+    # ПРІОРИТЕТ: Спочатку найновіші (по мінімальному часу з двох точок), потім за прибутком
+    results.sort(key=lambda x: (max(get_dt(x[7]), get_dt(x[8])), x[6]), reverse=True)
+    
     for r in results[:20]:
         name = get_item_name(r[0])
         q = QUALITY_NAMES.get(r[1], "Обычное")
@@ -199,7 +202,7 @@ async def restart(message: types.Message):
     await download_items()
     global items_data
     items_data = filter_items()
-    await message.answer("🔄 Базу EU та таймери оновлено!", reply_markup=keyboard)
+    await message.answer("🔄 База EU та таймери оновлено!", reply_markup=keyboard)
 
 async def main():
     await download_items()
