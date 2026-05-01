@@ -10,7 +10,6 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
 print("ФАЙЛ ЗАПУЩЕНО:", __file__)
 
-# Отримання токена з Railway Variables
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 if not BOT_TOKEN:
@@ -32,7 +31,6 @@ MARKET_PATH = "/api/v2/stats/prices/{}?locations={}"
 
 CITIES = ["Bridgewatch", "Martlock", "Lymhurst", "Thetford", "Caerleon", "Brecilien"]
 
-# Залишаємо якості російською, щоб збігалося з клієнтом гри
 QUALITY_NAMES = {
     1: "Обычное",
     2: "Хорошее",
@@ -114,11 +112,14 @@ def enchant_multiplier(e):
     return {1: 1.5, 2: 2, 3: 3, 4: 5}.get(e, 1)
 
 def format_time_ago(date_str):
-    """Перетворює час з API у зручний формат 'Х хв. тому'."""
     if not date_str or date_str.startswith("0001"):
         return "Невідомо"
     try:
         dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        # Якщо час прийшов без часової зони, примусово вважаємо його UTC
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+            
         now = datetime.now(UTC)
         diff = now - dt
         minutes = int(diff.total_seconds() / 60)
@@ -144,16 +145,20 @@ def is_fake(item_type, enchant, buy, sell, buy_date, sell_date):
     now = datetime.now(UTC)
 
     try:
-        if buy_date:
+        if buy_date and not buy_date.startswith("0001"):
             bd = datetime.fromisoformat(buy_date.replace("Z", "+00:00"))
+            if bd.tzinfo is None: 
+                bd = bd.replace(tzinfo=UTC)
             if now - bd > timedelta(hours=12):
                 return True, "buy date old"
     except:
         pass
 
     try:
-        if sell_date:
+        if sell_date and not sell_date.startswith("0001"):
             sd = datetime.fromisoformat(sell_date.replace("Z", "+00:00"))
+            if sd.tzinfo is None: 
+                sd = sd.replace(tzinfo=UTC)
             if now - sd > timedelta(hours=12):
                 return True, "sell date old"
     except:
@@ -265,7 +270,6 @@ async def scan_market():
                             hash_key = f"{i_id}_{quality}_{city_from}_{city_to}_{sell}"
                             if hash_key not in last_sent:
                                 real_count += 1
-                                # Передаємо також bd (дата купівлі) та sd (дата продажу)
                                 results.append((i_id, quality, city_from, city_to, buy, sell, profit_prem, profit_norm, bd, sd))
                                 last_sent[hash_key] = True
 
@@ -273,14 +277,12 @@ async def scan_market():
 
 async def send_flips(results, message):
     global last_sent
-    # Сортуємо результати за прибутком
     results.sort(key=lambda x: x[6], reverse=True)
     
     for item_id, quality, city_from, city_to, buy, sell, profit_prem, profit_norm, bd, sd in results[:30]:
         item_name = get_item_name(item_id)
         q_name = QUALITY_NAMES.get(quality, "Неизвестно")
         
-        # Форматуємо час для виводу
         buy_time = format_time_ago(bd)
         sell_time = format_time_ago(sd)
         
@@ -307,7 +309,7 @@ async def scan_cmd(message: types.Message):
     await message.answer("⏳ Сканую ринок (це займе близько хвилини)...")
     results = await scan_market()
     if not results:
-        await message.answer("Немає нових фліпів з профітом > 5000.")
+        await message.answer("Немає нових свіжих фліпів з профітом > 5000.")
     else:
         await send_flips(results, message)
     scan_running = False
