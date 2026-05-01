@@ -10,7 +10,6 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
 print("ФАЙЛ ЗАПУЩЕНО:", __file__)
 
-# Railway передає токен через Variables
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 if not BOT_TOKEN:
@@ -31,6 +30,14 @@ MARKET_PATH = "/api/v2/stats/prices/{}?locations={}"
 
 CITIES = ["Bridgewatch", "Martlock", "Lymhurst", "Thetford", "Caerleon", "Brecilien"]
 
+QUALITY_NAMES = {
+    1: "Обычное",
+    2: "Хорошее",
+    3: "Выдающееся",
+    4: "Отличное",
+    5: "Шедевр"
+}
+
 items_data = {}
 last_sent = {}
 scan_running = False
@@ -44,20 +51,15 @@ keyboard = ReplyKeyboardMarkup(
 )
 
 async def download_items():
-    """Завантажує items.json з GitHub."""
     global items_data
-
     print("⬇️ Завантажую items.json з GitHub...")
-
     async with aiohttp.ClientSession() as session:
         async with session.get(ITEMS_URL) as resp:
             text = await resp.text()
             items_data = {item["UniqueName"]: item for item in json.loads(text)}
-
     print(f"✅ Завантажено предметів: {len(items_data)}")
 
 def filter_items():
-    """Фільтрує предмети, залишаючи тільки потрібні для сканування."""
     allowed_keywords = [
         "weapon", "armor", "plate", "leather", "cloth",
         "melee", "ranged", "magic", "off", "shield", "torch", "book",
@@ -69,21 +71,16 @@ def filter_items():
     ]
 
     filtered = {}
-
     for item_id, item in items_data.items():
         if not item_id:
             continue
-
         if not item_id.startswith(("T4_", "T5_", "T6_", "T7_", "T8_")):
             continue
-
         name = item_id.lower()
         if not any(key in name for key in allowed_keywords):
             continue
-
         if "test" in name or "debug" in name or "unused" in name:
             continue
-
         filtered[item_id] = item
 
     print(f"🔎 Фільтр предметів: {len(filtered)} з {len(items_data)}")
@@ -95,20 +92,19 @@ def get_item_type(item_id):
     return item.get("ShopCategory", "unknown") if item else "unknown"
 
 def get_item_name(item_id):
-    """Отримує нормальну локалізовану назву предмета."""
     base_id = item_id.split("@")[0]
     enchant = item_id.split("@")[1] if "@" in item_id else ""
     
+    tier = base_id.split("_")[0] if base_id.startswith("T") else ""
+    if enchant:
+        tier += f".{enchant}"
+        
     item = items_data.get(base_id, {})
     loc_names = item.get("LocalizedNames", {})
-    
-    # Дістаємо російську назву. Якщо її раптом немає - беремо англійську або сам ID
     name = loc_names.get("RU-RU", loc_names.get("EN-US", base_id))
     
-    # Якщо є рівень зачарування (наприклад @1), додаємо його до назви як .1
-    if enchant:
-        name += f" .{enchant}"
-        
+    if tier:
+        return f"[{tier}] {name}"
     return name
 
 def enchant_multiplier(e):
@@ -157,7 +153,6 @@ def is_fake(item_type, enchant, buy, sell, buy_date, sell_date):
     return False, ""
 
 async def fetch_prices(session, items_chunk_str, cities_str):
-    """Запитує пачку предметів для всіх міст одразу."""
     for base in MARKET_BASE_URLS:
         url = base + MARKET_PATH.format(items_chunk_str, cities_str)
         try:
@@ -184,11 +179,6 @@ async def scan_market():
     start_time = datetime.now(UTC)
     last_log_time = start_time
 
-    print("────────────────────────────────────────────")
-    print("🔎 Сканування розпочато (ПАКЕТНИЙ РЕЖИМ)...")
-    print(f"📦 Всього предметів: {total_items}")
-    print("────────────────────────────────────────────")
-
     cities_str = ",".join(CITIES)
     chunk_size = 50
 
@@ -204,27 +194,27 @@ async def scan_market():
             now = datetime.now(UTC)
             if (now - last_log_time).total_seconds() >= 1.0:
                 elapsed = (now - start_time).total_seconds()
-                speed = processed_items / elapsed if elapsed > 0 else 0
-                print(
-                    f"[{elapsed:5.1f}s] "
-                    f"ITEMS: {processed_items}/{total_items} "
-                    f"| API: {api_calls} "
-                    f"| SPEED: {speed:.1f} items/s"
-                )
                 last_log_time = now
 
             if not data:
                 continue
 
-            # Групуємо результати по предметах
+            # Тепер групуємо і за ID предмета, і за його якістю!
             grouped_data = {}
             for entry in data:
                 i_id = entry.get("item_id")
-                if i_id not in grouped_data:
-                    grouped_data[i_id] = []
-                grouped_data[i_id].append(entry)
+                quality = entry.get("quality", 1)
+                
+                # Унікальний ключ: наприклад "T4_BAG_1"
+                key = f"{i_id}_{quality}"
+                if key not in grouped_data:
+                    grouped_data[key] = []
+                grouped_data[key].append(entry)
 
-            for i_id, entries in grouped_data.items():
+            for key_id, entries in grouped_data.items():
+                i_id, quality_str = key_id.split("_", 1)
+                quality = int(quality_str)
+                
                 for entry_from in entries:
                     for entry_to in entries:
                         city_from = entry_from.get("city")
@@ -233,11 +223,9 @@ async def scan_market():
                         if city_from == city_to or city_from not in CITIES or city_to not in CITIES:
                             continue
 
-                        # Купуємо в city_from по мінімальній ціні продажу
                         buy = entry_from.get("sell_price_min", 0)
                         bd = entry_from.get("sell_price_min_date", "")
 
-                        # Продаємо в city_to (виставляємо ордер) по конкурентній ціні продажу
                         sell = entry_to.get("sell_price_min", 0)
                         sd = entry_to.get("sell_price_min_date", "")
 
@@ -249,62 +237,54 @@ async def scan_market():
                             fake_count += 1
                             continue
 
-                        profit = sell - buy
-                        if profit >= 5000:
-                            key = f"{i_id}_{city_from}_{city_to}_{sell}"
-                            if key not in last_sent:
+                        profit_prem = int((sell * 0.935) - buy)
+                        profit_norm = int((sell * 0.895) - buy)
+
+                        if profit_prem >= 5000:
+                            # Додаємо якість до ключа, щоб не спамити однаковими повідомленнями
+                            hash_key = f"{i_id}_{quality}_{city_from}_{city_to}_{sell}"
+                            if hash_key not in last_sent:
                                 real_count += 1
-                                results.append((i_id, city_from, city_to, buy, sell, profit))
-                                last_sent[key] = True
-
-    end_time = datetime.now(UTC)
-    total_time = (end_time - start_time).total_seconds()
-
-    print("────────────────────────────────────────────")
-    print("🏁 Сканування завершено!")
-    print(f"⏱ Час: {total_time:.2f} сек")
-    print(f"📦 Оброблено: {processed_items}/{total_items}")
-    print(f"🔁 API запитів: {api_calls}")
-    print(f"✔ Знайдено фліпів: {real_count}")
-    print("────────────────────────────────────────────")
+                                results.append((i_id, quality, city_from, city_to, buy, sell, profit_prem, profit_norm))
+                                last_sent[hash_key] = True
 
     return results
 
 async def send_flips(results, message):
     global last_sent
-    for item_id, city_from, city_to, buy, sell, profit in results[:30]:
+    # Сортуємо результати за прибутком (від найбільшого до найменшого)
+    results.sort(key=lambda x: x[6], reverse=True)
+    
+    for item_id, quality, city_from, city_to, buy, sell, profit_prem, profit_norm in results[:30]:
         item_name = get_item_name(item_id)
+        q_name = QUALITY_NAMES.get(quality, "Неизвестно")
         
         await message.answer(
-            f"📦 <b>{item_name}</b>\n"
+            f"📦 <b>{item_name}</b> (<i>{q_name}</i>)\n"
             f"🔹 {city_from} → {city_to}\n"
-            f"💰 Купити: <b>{buy}</b>\n"
-            f"💸 Продати: <b>{sell}</b>\n"
-            f"📈 Профіт: <b>{profit}</b>",
+            f"💰 Купити: <b>{buy:,}</b>\n"
+            f"💸 Продати: <b>{sell:,}</b>\n\n"
+            f"👑 Прибуток (Прем): <b>{profit_prem:,}</b>\n"
+            f"💀 Прибуток (Без Прем): <b>{profit_norm:,}</b>",
             parse_mode=ParseMode.HTML
         )
     
     if len(results) > 30:
-        await message.answer(f"⚠️ Знайдено ще {len(results) - 30} фліпів, але показано лише перші 30.")
+        await message.answer(f"⚠️ Знайдено ще {len(results) - 30} фліпів, але показано 30 найприбутковіших.")
 
 @dp.message(Command("scan"))
 async def scan_cmd(message: types.Message):
     global scan_running
-
     if scan_running:
         await message.answer("⏳ Сканування вже виконується…")
         return
-
     scan_running = True
     await message.answer("⏳ Сканую ринок (це займе близько хвилини)...")
-
     results = await scan_market()
-
     if not results:
         await message.answer("Немає нових фліпів з профітом > 5000.")
     else:
         await send_flips(results, message)
-
     scan_running = False
 
 @dp.message(Command("start"))
