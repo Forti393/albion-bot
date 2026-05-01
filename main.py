@@ -10,6 +10,7 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
 print("ФАЙЛ ЗАПУЩЕНО:", __file__)
 
+# Отримання токена з Railway Variables
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 if not BOT_TOKEN:
@@ -101,6 +102,7 @@ def get_item_name(item_id):
         
     item = items_data.get(base_id, {})
     loc_names = item.get("LocalizedNames", {})
+    # Беремо російську назву, як ти просив
     name = loc_names.get("RU-RU", loc_names.get("EN-US", base_id))
     
     if tier:
@@ -199,13 +201,11 @@ async def scan_market():
             if not data:
                 continue
 
-            # Тепер групуємо і за ID предмета, і за його якістю!
             grouped_data = {}
             for entry in data:
                 i_id = entry.get("item_id")
                 quality = entry.get("quality", 1)
                 
-                # Унікальний ключ: наприклад "T4_BAG_1"
                 key = f"{i_id}_{quality}"
                 if key not in grouped_data:
                     grouped_data[key] = []
@@ -241,7 +241,6 @@ async def scan_market():
                         profit_norm = int((sell * 0.895) - buy)
 
                         if profit_prem >= 5000:
-                            # Додаємо якість до ключа, щоб не спамити однаковими повідомленнями
                             hash_key = f"{i_id}_{quality}_{city_from}_{city_to}_{sell}"
                             if hash_key not in last_sent:
                                 real_count += 1
@@ -252,7 +251,6 @@ async def scan_market():
 
 async def send_flips(results, message):
     global last_sent
-    # Сортуємо результати за прибутком (від найбільшого до найменшого)
     results.sort(key=lambda x: x[6], reverse=True)
     
     for item_id, quality, city_from, city_to, buy, sell, profit_prem, profit_norm in results[:30]:
@@ -306,9 +304,17 @@ async def restart_cmd(message: types.Message):
     await message.answer("✅ Готово! Натисни '🔄 Оновити зараз' або /scan")
 
 async def main():
+    print("⏳ Очікування 10 секунд перед стартом (уникнення конфлікту з попередньою версією)...")
+    await asyncio.sleep(10)
+    
+    # Видаляємо старі вебхуки та завислі апдейти, якщо вони були
+    await bot.delete_webhook(drop_pending_updates=True) 
+    
     await download_items()
     global items_data
     items_data = filter_items()
+    
+    print("🚀 Підключення до Telegram...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
