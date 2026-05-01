@@ -62,8 +62,7 @@ def get_mode_inline():
 def get_city_inline(exclude_city=None):
     buttons = []
     for c in CITIES:
-        if c == "Black Market" or c == exclude_city:
-            continue
+        if c == "Black Market" or c == exclude_city: continue
         buttons.append([InlineKeyboardButton(text=f"{CITY_EMOJIS[c]} {c}", callback_data=f"city_{c}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -165,12 +164,13 @@ async def main_search(message: types.Message, state: FSMContext):
     
     await state.clear()
     if current_mode == "all":
-        await message.answer(f"🔍 Сканую (Всі міста, до {max_buy_limit:,})...", reply_markup=get_main_kb())
+        # Спершу ховаємо клаву, потім шукаємо
+        await message.answer(f"🔍 Сканую (Всі міста, до {max_buy_limit:,})...", reply_markup=ReplyKeyboardRemove())
         res = await scan_logic()
         await display_results(message, res)
+        await message.answer("Пошук завершено:", reply_markup=get_main_kb())
     else:
-        # ПРИМУСОВО ПРИБИРАЄМО КЛАВІАТУРУ
-        await message.answer("📍 Режим Шлях. Обираємо маршрут...", reply_markup=ReplyKeyboardRemove())
+        await message.answer("📍 Режим Шлях. Звідки веземо?", reply_markup=ReplyKeyboardRemove())
         await message.answer("Обери місто відправки:", reply_markup=get_city_inline())
         await state.set_state(BotState.picking_from)
 
@@ -182,7 +182,7 @@ async def handle_limit_input(message: types.Message, state: FSMContext):
         global max_buy_limit
         max_buy_limit = int(text)
         await state.clear()
-        await message.answer(f"✅ Ліміт {max_buy_limit:,} збережено.", reply_markup=get_mode_inline())
+        await message.answer(f"✅ Ліміт {max_buy_limit:,} збережено. Обери режим:", reply_markup=get_mode_inline())
 
 @dp.callback_query(F.data.startswith("set_mode_"))
 async def set_mode(callback: types.CallbackQuery, state: FSMContext):
@@ -190,12 +190,13 @@ async def set_mode(callback: types.CallbackQuery, state: FSMContext):
     current_mode = callback.data.split("_")[2]
     
     if current_mode == "all":
-        await callback.message.answer(f"✅ Режим змінено на: Всі міста", reply_markup=get_main_kb())
+        # Ховаємо клавіатуру при старті пошуку через інлайн-кнопку
+        await callback.message.answer(f"✅ Обрано Всі міста. Шукаю...", reply_markup=ReplyKeyboardRemove())
         res = await scan_logic()
         await display_results(callback.message, res)
+        await callback.message.answer("Готово!", reply_markup=get_main_kb())
     else:
-        # ПРИ ВИБОРІ ШЛЯХУ ТЕЖ ХОВАЄМО КЛАВІАТУРУ
-        await callback.message.answer(f"✅ Режим змінено на: Шлях. Обираємо маршрут...", reply_markup=ReplyKeyboardRemove())
+        await callback.message.answer(f"✅ Режим: Шлях. Обираємо маршрут...", reply_markup=ReplyKeyboardRemove())
         await callback.message.answer("📍 Звідки веземо?", reply_markup=get_city_inline())
         await state.set_state(BotState.picking_from)
     await callback.answer()
@@ -228,8 +229,7 @@ async def to_city(callback: types.CallbackQuery, state: FSMContext):
     res = await scan_logic(f_c, t_c)
     await display_results(callback.message, res)
     await state.clear()
-    # ПОВЕРТАЄМО МЕНЮ ПІСЛЯ ПОШУКУ
-    await callback.message.answer("Готово!", reply_markup=get_main_kb())
+    await callback.message.answer("Пошук завершено:", reply_markup=get_main_kb())
     await callback.answer()
 
 # --- КАЛЬКУЛЯТОР ---
