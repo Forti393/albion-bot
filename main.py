@@ -169,7 +169,8 @@ async def main_search(message: types.Message, state: FSMContext):
         res = await scan_logic()
         await display_results(message, res)
     else:
-        await message.answer("📍 Режим Шлях. Звідки веземо?", reply_markup=ReplyKeyboardRemove())
+        # ПРИМУСОВО ПРИБИРАЄМО КЛАВІАТУРУ
+        await message.answer("📍 Режим Шлях. Обираємо маршрут...", reply_markup=ReplyKeyboardRemove())
         await message.answer("Обери місто відправки:", reply_markup=get_city_inline())
         await state.set_state(BotState.picking_from)
 
@@ -187,18 +188,21 @@ async def handle_limit_input(message: types.Message, state: FSMContext):
 async def set_mode(callback: types.CallbackQuery, state: FSMContext):
     global current_mode
     current_mode = callback.data.split("_")[2]
-    await callback.message.answer(f"✅ Режим: {'Всі міста' if current_mode=='all' else 'Шлях'}", reply_markup=get_main_kb())
+    
     if current_mode == "all":
+        await callback.message.answer(f"✅ Режим змінено на: Всі міста", reply_markup=get_main_kb())
         res = await scan_logic()
         await display_results(callback.message, res)
     else:
+        # ПРИ ВИБОРІ ШЛЯХУ ТЕЖ ХОВАЄМО КЛАВІАТУРУ
+        await callback.message.answer(f"✅ Режим змінено на: Шлях. Обираємо маршрут...", reply_markup=ReplyKeyboardRemove())
         await callback.message.answer("📍 Звідки веземо?", reply_markup=get_city_inline())
         await state.set_state(BotState.picking_from)
     await callback.answer()
 
 @dp.message(F.text.startswith("🗺️ Режими"))
 async def modes_btn(message: types.Message):
-    await message.answer("Обери режим:", reply_markup=get_mode_inline())
+    await message.answer("Обери режим пошуку:", reply_markup=get_mode_inline())
 
 @dp.message(F.text.contains("Екстра"))
 async def toggle_extra(message: types.Message):
@@ -207,12 +211,11 @@ async def toggle_extra(message: types.Message):
     status = "УВІМКНЕНО (30 хв)" if extra_filter_active else "ВИМКНЕНО (ліміт 3 год)"
     await message.answer(f"⚡ Екстра фільтр: {status}", reply_markup=get_main_kb())
 
-# --- ВИБІР ШЛЯХУ (З ВИКЛЮЧЕННЯМ ОДНАКОВИХ МІСТ) ---
+# --- ВИБІР ШЛЯХУ ---
 @dp.callback_query(BotState.picking_from)
 async def from_city(callback: types.CallbackQuery, state: FSMContext):
     city = callback.data.split("_")[1]
     await state.update_data(f_c=city)
-    # Передаємо вибране місто як виключення для наступної клавіатури
     await callback.message.edit_text(f"Звідки: {CITY_EMOJIS[city]} {city}\n📍 Куди?", reply_markup=get_city_inline(exclude_city=city))
     await state.set_state(BotState.picking_to)
 
@@ -225,6 +228,7 @@ async def to_city(callback: types.CallbackQuery, state: FSMContext):
     res = await scan_logic(f_c, t_c)
     await display_results(callback.message, res)
     await state.clear()
+    # ПОВЕРТАЄМО МЕНЮ ПІСЛЯ ПОШУКУ
     await callback.message.answer("Готово!", reply_markup=get_main_kb())
     await callback.answer()
 
