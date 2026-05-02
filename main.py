@@ -9,7 +9,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 # ================= НАЛАШТУВАННЯ =================
-ADMIN_ID = 0  # ⚠️ ВПИШИ СВІЙ ID СЮДИ
+ADMIN_ID = 1052964898  # ⚠️ ВПИШИ СВІЙ ID СЮДИ
 
 bot = Bot(token=os.environ.get("BOT_TOKEN"))
 dp = Dispatcher(storage=MemoryStorage())
