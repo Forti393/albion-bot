@@ -24,9 +24,13 @@ QUALITY_NAMES = {1:"Обычное", 2:"Хорошее", 3:"Выдающееся
 TRASH = ["Знаток ","Мастер ","Великий мастер ","Старейшина ","Ученик ","Новичок "]
 
 class BotState(StatesGroup):
-    waiting_for_buy_limit = State(); waiting_for_profit_limit = State()
-    picking_from = State(); picking_to = State()
-    calc_count = State(); calc_buy = State(); calc_sell = State()
+    waiting_for_buy_limit = State()
+    waiting_for_profit_limit = State()
+    picking_from = State()
+    picking_to = State()
+    calc_count = State()
+    calc_buy = State()
+    calc_sell = State()
 
 # ================= КЛАВІАТУРИ =================
 def get_start_kb(): 
@@ -34,8 +38,7 @@ def get_start_kb():
 
 def get_main_kb(d):
     m = d.get("mode")
-    if not m: return get_start_kb() # Якщо режим не обрано, вертаємо до старту
-    
+    if not m: return get_start_kb()
     m_l = "🌍 Охоплення: Всі міста" if m == "all" else "📍 Маршрут: Шлях"
     e_l = "🚫 Вимкнути фільтр 30хв" if d.get("extra") else "⚡ Свіжі ціни (30хв)"
     return ReplyKeyboardMarkup(keyboard=[
@@ -162,42 +165,73 @@ async def from_cb(cb, state: FSMContext):
 async def to_cb(cb, state: FSMContext):
     await cb.answer(); t = cb.data.split("_")[1]
     await state.update_data(t_c=t, mode="custom"); d = await state.get_data()
-    await state.set_state(None); await cb.message.answer(f"✅ Маршрут встановлено!", reply_markup=get_main_kb(d))
+    await state.set_state(None)
+    await cb.message.answer(f"✅ Маршрут встановлено!", reply_markup=get_main_kb(d))
 
 @dp.message(F.text == "💰 Налаштувати бюджет", StateFilter('*'))
 async def limit_menu(m, state: FSMContext):
-    await state.set_state(None); d = await state.get_data()
+    await state.clear() # Очищаємо все старе
+    d = await state.get_data()
     b, p = d.get("buy_limit",0), d.get("profit_limit",4000)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"💰 Бюджет ({b:,})", callback_data="set_limit_buy")],[InlineKeyboardButton(text=f"📈 Профіт ({p:,})", callback_data="set_limit_profit")]])
     await m.answer("⚙️ Налаштування:", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("set_limit_"), StateFilter('*'))
 async def set_limit_cb(cb, state: FSMContext):
-    await cb.answer(); t = cb.data.split("_")[2]
-    await state.set_state(BotState.waiting_for_buy_limit if t=="buy" else BotState.waiting_for_profit_limit)
-    await cb.message.edit_text("💰 Введи число:" if t=="buy" else "📈 Введи мін. профіт:")
+    await cb.answer()
+    t = cb.data.split("_")[2]
+    if t == "buy":
+        await state.set_state(BotState.waiting_for_buy_limit)
+        await cb.message.edit_text("💰 Введи число (макс. ціна покупки):")
+    else:
+        await state.set_state(BotState.waiting_for_profit_limit)
+        await cb.message.edit_text("📈 Введи число (мін. профіт):")
 
 @dp.message(StateFilter(BotState.waiting_for_buy_limit, BotState.waiting_for_profit_limit))
 async def h_limits(m, state: FSMContext):
     try:
-        v = int(m.text.replace(" ","").replace(",","")); curr = await state.get_state()
-        if "buy" in curr: await state.update_data(buy_limit=v)
-        else: await state.update_data(profit_limit=v)
-        d = await state.get_data(); await state.set_state(None)
+        v = int(m.text.replace(" ","").replace(",",""))
+        curr = await state.get_state()
+        if curr == BotState.waiting_for_buy_limit.state:
+            await state.update_data(buy_limit=v)
+        else:
+            await state.update_data(profit_limit=v)
+        
+        d = await state.get_data()
+        await state.set_state(None) # Виходимо зі стану очікування числа
+        
         if not d.get("mode"):
             await m.answer(f"✅ Збережено: {v:,}\nТепер обери режим пошуку:", reply_markup=get_mode_inline())
         else:
             await m.answer(f"✅ Збережено: {v:,}", reply_markup=get_main_kb(d))
-    except: await m.answer("❌ Тільки цифри!")
+    except:
+        await m.answer("❌ Будь ласка, введи тільки ціле число!")
 
 async def disp_res(msg, res):
     if not res: return
     res.sort(key=lambda x: x['p_n'], reverse=True)
     for r in res[:15]:
-        b_id = r['id'].split("@")[0]; enc = r['id'].split("@")[1] if "@" in r['id'] else "0"
+        b_id = r['id'].split("@")[0]
+        enc = r['id'].split("@")[1] if "@" in r['id'] else "0"
         name = items_data.get(b_id, {}).get("LocalizedNames", {}).get("RU-RU", b_id)
         for t in TRASH: name = name.replace(t, "")
-        text = (f"📦 <b>{name.upper()}</b> <code>[{b_id.split('_')[0][1:]}.{enc}]</code>\n✨ Качество: <b>{QUALITY_NAMES.get(r['q'], 'Обычное')}</b>\n──────────────────\n📥 <b>КУПІВЛЯ:</b> {CITY_EMOJIS[r['from']]} {r['from']}\n💰 Ціна: <code>{r['buy']:,}</code>\n⏳ Оновлено: <b>{fmt_t(r['bd'])}</b> тому\n\n📤 <b>ПРОДАЖ:</b> {CITY_EMOJIS[r['to']]} {r['to']}\n💰 Ціна: <code>{r['sell']:,}</code>\n⏳ Оновлено: <b>{fmt_t(r['sd'])}</b> тому\n──────────────────\n💵 <b>ЧИСТИЙ ПРИБУТОК:</b>\n👑 З Преміумом: <code>+{r['p_p']:,}</code>\n💀 Без Преміуму: <code>+{r['p_n']:,}</code>\n──────────────────")
+        
+        text = (
+            f"📦 <b>{name.upper()}</b> <code>[{b_id.split('_')[0][1:]}.{enc}]</code>\n"
+            f"✨ Качество: <b>{QUALITY_NAMES.get(r['q'], 'Обычное')}</b>\n"
+            f"──────────────────\n"
+            f"📥 <b>КУПІВЛЯ:</b> {CITY_EMOJIS[r['from']]} {r['from']}\n"
+            f"💰 Ціна: <code>{r['buy']:,}</code>\n"
+            f"⏳ Оновлено: <b>{fmt_t(r['bd'])}</b> тому\n\n"
+            f"📤 <b>ПРОДАЖ:</b> {CITY_EMOJIS[r['to']]} {r['to']}\n"
+            f"💰 Ціна: <code>{r['sell']:,}</code>\n"
+            f"⏳ Оновлено: <b>{fmt_t(r['sd'])}</b> тому\n"
+            f"──────────────────\n"
+            f"💵 <b>ЧИСТИЙ ПРИБУТОК:</b>\n"
+            f"👑 З Преміумом: <code>+{r['p_p']:,}</code>\n"
+            f"💀 Без Преміуму: <code>+{r['p_n']:,}</code>\n"
+            f"──────────────────"
+        )
         await msg.answer(text, parse_mode=ParseMode.HTML)
 
 @dp.message(F.text.contains("Охоплення") | F.text.contains("Маршрут"), StateFilter('*'))
@@ -230,7 +264,7 @@ async def adm_upd(cb):
 
 @dp.callback_query(F.data == "conf_res")
 async def conf_res(cb, state: FSMContext): 
-    await state.clear() # ПОВНЕ ОЧИЩЕННЯ
+    await state.clear()
     await cb.answer()
     await cb.message.answer("🔄 Все скинуто! Бот повернувся до початкового стану.", reply_markup=get_start_kb())
 
