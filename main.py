@@ -45,6 +45,14 @@ current_mode = "all"
 
 # ================= КЛАВІАТУРИ =================
 def get_start_kb():
+    """Клавіатура при першому старті"""
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="❓ Допомога"), KeyboardButton(text="⚙️ Ліміт")]], 
+        resize_keyboard=True
+    )
+
+def get_limit_only_kb():
+    """Клавіатура після прочитання допомоги"""
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⚙️ Ліміт")]], resize_keyboard=True)
 
 def get_search_only_kb():
@@ -162,7 +170,6 @@ async def scan_logic(from_city=None, to_city=None):
                         
                         p_p, p_n = int(sell * 0.935 - buy), int(sell * 0.895 - buy)
                         
-                        # ГОЛОВНИЙ ФІЛЬТР: Перевіряємо чистий дохід БЕЗ прему
                         if p_n >= min_profit_limit:
                             results.append({
                                 'id': i_id, 'q': int(qual), 'from': f_city, 'to': t_city,
@@ -171,17 +178,33 @@ async def scan_logic(from_city=None, to_city=None):
                             })
     return results
 
-# ================= ОБРОБНИКИ =================
+# ================= ОБРОБНИКИ СТАРТУ ТА ДОПОМОГИ =================
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(
-        "👋 <b>Albion Trader Bot</b>\n\n"
-        "Натисни <b>⚙️ Ліміт</b>, щоб встановити максимальний бюджет покупки.\n"
-        "Після цього відкриється головне меню.",
+        "👋 <b>Вітаю в Albion Trader Bot!</b>\n\n"
+        "Для ознайомлення з ботом натисни <b>❓ Допомога</b>.\n"
+        "Якщо питань немає, тисни <b>⚙️ Ліміт</b> для початку роботи.",
         reply_markup=get_start_kb(), parse_mode=ParseMode.HTML
     )
+
+@dp.message(F.text == "❓ Допомога")
+async def cmd_help(message: types.Message, state: FSMContext):
+    await state.clear()
+    help_text = (
+        "📖 <b>Як користуватися ботом:</b>\n\n"
+        "1️⃣ <b>⚙️ Ліміт</b> — найголовніша кнопка. Тут ти задаєш свій максимальний бюджет на покупку однієї речі та бажаний мінімальний чистий прибуток. Без налаштування ліміту бот не почне пошук.\n\n"
+        "2️⃣ <b>🔍 Пошук</b> — запускає сканування ринку Альбіону і видає найвигідніші варіанти для перепродажу (фліпи).\n\n"
+        "3️⃣ <b>🗺️ Режими</b> — дозволяє змінити тип пошуку. Можна шукати 'Всі міста' одразу (Рандом) або везти товар з конкретного міста в інше (Шлях).\n\n"
+        "4️⃣ <b>⚡ Екстра</b> — жорсткий фільтр за часом. Залишає в списку тільки ті ціни, які перевірялися іншими гравцями не пізніше ніж 30 хвилин тому.\n\n"
+        "5️⃣ <b>🧮 Калькулятор</b> — ручний інструмент. Вводиш кількість предметів, ціну купівлі та ціну продажу, а бот рахує твій чистий прибуток з урахуванням усіх податків гри.\n\n"
+        "🚀 <i>Все просто! Тисни <b>⚙️ Ліміт</b>, щоб встановити бюджет і розпочати роботу.</i>"
+    )
+    await message.answer(help_text, reply_markup=get_limit_only_kb(), parse_mode=ParseMode.HTML)
+
+# ================= ІНШІ ОБРОБНИКИ =================
 
 @dp.message(F.text == "⚙️ Ліміт")
 async def limit_menu(message: types.Message, state: FSMContext):
@@ -205,7 +228,8 @@ async def set_limit_callback(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.message(BotState.waiting_for_buy_limit)
 async def handle_buy_limit_input(message: types.Message, state: FSMContext):
-    if any(x in message.text for x in ["🔍", "🗺️", "⚡", "🚫", "🧮", "⚙️", "🔁", "📱"]):
+    # Додали "❓" у перевірку, щоб кнопка допомоги теж скидала стан
+    if any(x in message.text for x in ["🔍", "🗺️", "⚡", "🚫", "🧮", "⚙️", "🔁", "📱", "❓"]):
         await state.clear()
         return
     text = message.text.replace(" ","").replace(",","")
@@ -219,12 +243,10 @@ async def handle_buy_limit_input(message: types.Message, state: FSMContext):
 
 @dp.message(BotState.waiting_for_profit_limit)
 async def handle_profit_limit_input(message: types.Message, state: FSMContext):
-    if any(x in message.text for x in ["🔍", "🗺️", "⚡", "🚫", "🧮", "⚙️", "🔁", "📱"]):
+    if any(x in message.text for x in ["🔍", "🗺️", "⚡", "🚫", "🧮", "⚙️", "🔁", "📱", "❓"]):
         await state.clear()
         return
     text = message.text.replace(" ","").replace(",","")
-    
-    # Дозволяємо вводити від'ємні числа (наприклад, -1000)
     is_negative = text.startswith("-") and text[1:].isdigit()
     
     if text.isdigit() or is_negative:
@@ -242,7 +264,7 @@ async def main_search(message: types.Message, state: FSMContext):
         await message.answer("Спочатку встанови <b>Ліміт купівлі</b>!", parse_mode=ParseMode.HTML)
         return
     if current_mode == "all":
-        await message.answer(f"🔍 Сканую (Ліміт купівлі: {max_buy_limit:,} | Мін. прибуток: {min_profit_limit:,})...", reply_markup=ReplyKeyboardRemove())
+        await message.answer(f"🔍 Сканую (Купівля: до {max_buy_limit:,} | Прибуток: від {min_profit_limit:,})...", reply_markup=ReplyKeyboardRemove())
         res = await scan_logic()
         await display_results(message, res)
         await message.answer("Завершено.", reply_markup=get_main_kb())
@@ -346,7 +368,6 @@ async def display_results(message, res):
     if not res:
         await message.answer("Нічого не знайдено.")
         return
-    # Сортуємо результати тепер за прибутком без преміуму (p_n)
     res.sort(key=lambda x: (max(get_dt(x['bd']), get_dt(x['sd'])), x['p_n']), reverse=True)
     for r in res[:15]:
         item_raw = r['id'].split("@")
