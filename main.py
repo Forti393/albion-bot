@@ -9,7 +9,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 # ================= НАЛАШТУВАННЯ =================
-ADMIN_ID = 1052964898  # ⚠️ Твій ID
+ADMIN_ID = 0  # ⚠️ ВПИШИ СВІЙ ID СЮДИ
 
 bot = Bot(token=os.environ.get("BOT_TOKEN"))
 dp = Dispatcher(storage=MemoryStorage())
@@ -33,7 +33,9 @@ def get_start_kb():
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❓ Допомога"), KeyboardButton(text="💰 Налаштувати бюджет")]], resize_keyboard=True)
 
 def get_main_kb(d):
-    m = d.get("mode","all")
+    m = d.get("mode")
+    if not m: return get_start_kb() # Якщо режим не обрано, вертаємо до старту
+    
     m_l = "🌍 Охоплення: Всі міста" if m == "all" else "📍 Маршрут: Шлях"
     e_l = "🚫 Вимкнути фільтр 30хв" if d.get("extra") else "⚡ Свіжі ціни (30хв)"
     return ReplyKeyboardMarkup(keyboard=[
@@ -42,6 +44,12 @@ def get_main_kb(d):
         [KeyboardButton(text="🧮 Калькулятор"), KeyboardButton(text="💰 Налаштувати бюджет")],
         [KeyboardButton(text="🔄 Перезавантаження")]
     ], resize_keyboard=True)
+
+def get_mode_inline(): 
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎲 Всі міста", callback_data="set_mode_all")],
+        [InlineKeyboardButton(text="📍 Конкретний шлях", callback_data="set_mode_custom")]
+    ])
 
 # ================= ЛОГІКА =================
 async def download_items():
@@ -117,7 +125,9 @@ async def main_search(m, state: FSMContext):
     b = d.get("buy_limit", 0)
     if b <= 0: return await m.answer("💰 Встанови бюджет у меню!")
     
-    mode = d.get("mode", "all")
+    mode = d.get("mode")
+    if not mode: return await m.answer("🗺️ Обери режим!", reply_markup=get_mode_inline())
+
     if is_admin:
         s_msg = await m.answer("⚡ <b>Адмін-сканування...</b>", parse_mode=ParseMode.HTML, reply_markup=ReplyKeyboardRemove())
         res = await scan_logic(d, d.get('f_c'), d.get('t_c'))
@@ -174,7 +184,10 @@ async def h_limits(m, state: FSMContext):
         if "buy" in curr: await state.update_data(buy_limit=v)
         else: await state.update_data(profit_limit=v)
         d = await state.get_data(); await state.set_state(None)
-        await m.answer(f"✅ Збережено: {v:,}", reply_markup=get_main_kb(d))
+        if not d.get("mode"):
+            await m.answer(f"✅ Збережено: {v:,}\nТепер обери режим пошуку:", reply_markup=get_mode_inline())
+        else:
+            await m.answer(f"✅ Збережено: {v:,}", reply_markup=get_main_kb(d))
     except: await m.answer("❌ Тільки цифри!")
 
 async def disp_res(msg, res):
@@ -184,7 +197,7 @@ async def disp_res(msg, res):
         b_id = r['id'].split("@")[0]; enc = r['id'].split("@")[1] if "@" in r['id'] else "0"
         name = items_data.get(b_id, {}).get("LocalizedNames", {}).get("RU-RU", b_id)
         for t in TRASH: name = name.replace(t, "")
-        text = (f"📦 <b>{name.upper()}</b> <code>[{b_id.split('_')[0][1:]}.{enc}]</b>\n✨ Качество: <b>{QUALITY_NAMES.get(r['q'], 'Обычное')}</b>\n──────────────────\n📥 <b>КУПІВЛЯ:</b> {CITY_EMOJIS[r['from']]} {r['from']}\n💰 Ціна: <code>{r['buy']:,}</code>\n⏳ Оновлено: <b>{fmt_t(r['bd'])}</b> тому\n\n📤 <b>ПРОДАЖ:</b> {CITY_EMOJIS[r['to']]} {r['to']}\n💰 Ціна: <code>{r['sell']:,}</code>\n⏳ Оновлено: <b>{fmt_t(r['sd'])}</b> тому\n──────────────────\n💵 <b>ЧИСТИЙ ПРИБУТОК:</b>\n👑 З Преміумом: <code>+{r['p_p']:,}</code>\n💀 Без Преміуму: <code>+{r['p_n']:,}</code>\n──────────────────")
+        text = (f"📦 <b>{name.upper()}</b> <code>[{b_id.split('_')[0][1:]}.{enc}]</code>\n✨ Качество: <b>{QUALITY_NAMES.get(r['q'], 'Обычное')}</b>\n──────────────────\n📥 <b>КУПІВЛЯ:</b> {CITY_EMOJIS[r['from']]} {r['from']}\n💰 Ціна: <code>{r['buy']:,}</code>\n⏳ Оновлено: <b>{fmt_t(r['bd'])}</b> тому\n\n📤 <b>ПРОДАЖ:</b> {CITY_EMOJIS[r['to']]} {r['to']}\n💰 Ціна: <code>{r['sell']:,}</code>\n⏳ Оновлено: <b>{fmt_t(r['sd'])}</b> тому\n──────────────────\n💵 <b>ЧИСТИЙ ПРИБУТОК:</b>\n👑 З Преміумом: <code>+{r['p_p']:,}</code>\n💀 Без Преміуму: <code>+{r['p_n']:,}</code>\n──────────────────")
         await msg.answer(text, parse_mode=ParseMode.HTML)
 
 @dp.message(F.text.contains("Охоплення") | F.text.contains("Маршрут"), StateFilter('*'))
@@ -197,20 +210,43 @@ async def toggle_extra(m, state: FSMContext):
 
 @dp.message(F.text == "🔄 Перезавантаження", StateFilter('*'))
 async def btn_res(m, state: FSMContext):
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Скинути", callback_data="conf_res"), InlineKeyboardButton(text="❌ Ні", callback_data="cancel_res")]])
-    await m.answer("⚠️ Скинути твої дані?", reply_markup=kb)
+    u_id = m.from_user.id
+    if u_id == ADMIN_ID:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📥 Оновити БД (Адмін)", callback_data="adm_upd")],
+            [InlineKeyboardButton(text="✅ Скинути все", callback_data="conf_res"), InlineKeyboardButton(text="❌ Ні", callback_data="cancel_res")]
+        ])
+        await m.answer("🛠 <b>Адмін-панель:</b>\nОбери дію:", reply_markup=kb, parse_mode=ParseMode.HTML)
+    else:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Скинути", callback_data="conf_res"), InlineKeyboardButton(text="❌ Ні", callback_data="cancel_res")]])
+        await m.answer("⚠️ Скинути твої дані?", reply_markup=kb)
+
+@dp.callback_query(F.data == "adm_upd")
+async def adm_upd(cb):
+    if cb.from_user.id == ADMIN_ID:
+        asyncio.create_task(download_items())
+        await cb.message.edit_text("✅ База оновлюється у фоні...")
+    await cb.answer()
 
 @dp.callback_query(F.data == "conf_res")
-async def conf_res(cb, state: FSMContext): await state.clear(); await cb.answer(); await cb.message.answer("🔄 Скинуто!", reply_markup=get_start_kb())
+async def conf_res(cb, state: FSMContext): 
+    await state.clear() # ПОВНЕ ОЧИЩЕННЯ
+    await cb.answer()
+    await cb.message.answer("🔄 Все скинуто! Бот повернувся до початкового стану.", reply_markup=get_start_kb())
 
 @dp.callback_query(F.data == "cancel_res")
-async def cancel_res(cb): await cb.answer(); await cb.message.delete()
+async def cancel_res(cb): 
+    await cb.answer()
+    await cb.message.delete()
 
 @dp.message(Command("start"), StateFilter('*'))
-async def cmd_start(m, state: FSMContext): await state.clear(); await m.answer("👋 Бот готовий!", reply_markup=get_start_kb())
+async def cmd_start(m, state: FSMContext): 
+    await state.clear()
+    await m.answer("👋 Бот готовий! Встанови бюджет та обери режим.", reply_markup=get_start_kb())
 
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
-    asyncio.create_task(download_items()); await dp.start_polling(bot)
+    asyncio.create_task(download_items())
+    await dp.start_polling(bot)
 
 if __name__ == "__main__": asyncio.run(main())
