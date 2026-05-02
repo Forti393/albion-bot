@@ -11,7 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 # ================= НАЛАШТУВАННЯ =================
-ADMIN_ID = 1052964898  # ⚠️ ВПИШИ СВІЙ TELEGRAM ID СЮДИ (цифрами, без лапок)
+ADMIN_ID = 0  # ⚠️ ВПИШИ СВІЙ TELEGRAM ID СЮДИ (цифрами, без лапок)
 
 MARKET_BASE_URL = "https://europe.albion-online-data.com"
 MARKET_PATH = "/api/v2/stats/prices/{}?locations={}"
@@ -45,7 +45,7 @@ max_buy_limit = 0
 min_profit_limit = 4000  
 extra_filter_active = False 
 current_mode = None  
-is_db_ready = False  # Індикатор готовності бази
+is_db_ready = False  
 
 # ================= КЛАВІАТУРИ =================
 def get_start_kb():
@@ -102,7 +102,7 @@ async def download_items():
     except Exception as e:
         print(f"Помилка завантаження бази предметів: {e}")
     finally:
-        is_db_ready = True  # Відкриваємо доступ до пошуку
+        is_db_ready = True  
 
 def get_dt(date_str):
     if not date_str or date_str.startswith("0001"): return datetime(1970, 1, 1, tzinfo=UTC)
@@ -150,7 +150,7 @@ async def scan_logic(from_city=None, to_city=None):
                 async with session.get(url) as resp:
                     data = await resp.json() if resp.status == 200 else []
             except Exception:
-                continue # Якщо якийсь пакет відвалився - просто йдемо далі
+                continue 
                 
             grouped = {f"{e['item_id']}|{e['quality']}": {} for e in data}
             for e in data: grouped[f"{e['item_id']}|{e['quality']}"][e['city']] = e
@@ -187,7 +187,7 @@ async def scan_logic(from_city=None, to_city=None):
                             })
     return results
 
-# ================= ГОЛОВНІ КНОПКИ (ПЕРЕБИВАЮТЬ БУДЬ-ЯКИЙ СТАН) =================
+# ================= ГОЛОВНІ КНОПКИ =================
 @dp.message(Command("start"), StateFilter('*'))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
@@ -397,4 +397,8 @@ async def calc_b(message: types.Message, state: FSMContext):
         await message.answer(f"✅ Купівля: {val:,}\n📤 <b>Ціна ПРОДАЖУ (1 шт):</b>", parse_mode=ParseMode.HTML)
         await state.set_state(BotState.calc_sell)
     else:
-        await message.answer(
+        await message.answer("❌ Введи число!")
+
+@dp.message(BotState.calc_sell)
+async def calc_s(message: types.Message, state: FSMContext):
+    if is_menu_command(m
