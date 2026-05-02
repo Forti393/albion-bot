@@ -11,7 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 # ================= НАЛАШТУВАННЯ =================
-ADMIN_ID = 0  # ⚠️ ВПИШИ СВІЙ TELEGRAM ID СЮДИ (цифрами, без лапок)
+ADMIN_ID = 1052964898  # ⚠️ ВПИШИ СВІЙ TELEGRAM ID СЮДИ (цифрами, без лапок)
 
 MARKET_BASE_URL = "https://europe.albion-online-data.com"
 MARKET_PATH = "/api/v2/stats/prices/{}?locations={}"
