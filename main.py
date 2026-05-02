@@ -9,7 +9,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 # ================= НАЛАШТУВАННЯ =================
-ADMIN_ID = 1052964898  # ⚠️ ВПИШИ СВІЙ ID
+ADMIN_ID = 0  # ⚠️ ВПИШИ СВІЙ ID
 
 bot = Bot(token=os.environ.get("BOT_TOKEN"))
 dp = Dispatcher(storage=MemoryStorage())
@@ -116,7 +116,7 @@ async def main_search(m, state: FSMContext):
     d = await state.get_data()
     
     if not is_admin:
-        if u_id in active_scans: return await m.answer("⚠️ Зачекай, твій запит ще обробляється!")
+        if u_id in active_scans: return await m.answer("⚠️ Твій запит ще обробляється!")
         if u_id in user_cooldowns and (now - user_cooldowns[u_id]).total_seconds() < 25:
             return await m.answer(f"⏳ Зачекай {int(25-(now-user_cooldowns[u_id]).total_seconds())} сек.")
 
@@ -148,29 +148,41 @@ async def set_mode_cb(cb, state: FSMContext):
     m = cb.data.split("_")[2]
     await state.update_data(mode=m)
     d = await state.get_data()
+    
+    # Видаляємо кнопки вибору режиму, щоб юзер не тикав повторно
+    await cb.message.delete()
+    
     if m == "all":
         await cb.message.answer("🌍 Режим: Всі міста", reply_markup=get_main_kb(d))
     else:
         await state.set_state(BotState.picking_from)
-        await cb.message.answer("📍 Звідки веземо товар?", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{CITY_EMOJIS[c]} {c}", callback_data=f"city_{c}")] for c in CITIES if c!="Black Market"]))
+        await cb.message.answer("📍 Звідки веземо товар?", 
+                                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{CITY_EMOJIS[c]} {c}", callback_data=f"city_{c}")] for c in CITIES if c!="Black Market"]))
 
-@dp.callback_query(StateFilter(BotState.picking_from))
+@dp.callback_query(StateFilter(BotState.picking_from), F.data.startswith("city_"))
 async def from_cb(cb, state: FSMContext):
     await cb.answer()
     c = cb.data.split("_")[1]
     await state.update_data(f_c=c)
     await state.set_state(BotState.picking_to)
-    # Нове повідомлення замість редагування для швидкості
+    
+    # Видаляємо повідомлення з вибором "Звідки", щоб юзер не тикав повторно
+    await cb.message.delete()
+    
     await cb.message.answer(f"✅ Звідки: {c}\n📍 Тепер обери куди (Пункт Б):", 
                              reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{CITY_EMOJIS[ci]} {ci}", callback_data=f"city_{ci}")] for ci in CITIES if ci!=c and ci!="Black Market"]))
 
-@dp.callback_query(StateFilter(BotState.picking_to))
+@dp.callback_query(StateFilter(BotState.picking_to), F.data.startswith("city_"))
 async def to_cb(cb, state: FSMContext):
     await cb.answer()
     t = cb.data.split("_")[1]
     await state.update_data(t_c=t, mode="custom")
     d = await state.get_data()
     await state.set_state(None)
+    
+    # Видаляємо повідомлення з вибором "Куди"
+    await cb.message.delete()
+    
     await cb.message.answer(f"🚀 Маршрут встановлено: {d['f_c']} ➔ {t}", reply_markup=get_main_kb(d))
 
 @dp.message(F.text == "💰 Налаштувати бюджет", StateFilter('*'))
@@ -185,6 +197,9 @@ async def limit_menu(m, state: FSMContext):
 async def set_limit_cb(cb, state: FSMContext):
     await cb.answer()
     t = cb.data.split("_")[2]
+    # Видаляємо кнопки налаштувань, щоб не було спаму
+    await cb.message.delete()
+    
     await state.set_state(BotState.waiting_for_buy_limit if t=="buy" else BotState.waiting_for_profit_limit)
     await cb.message.answer("💰 Введи число (наприклад 50000):")
 
@@ -258,6 +273,7 @@ async def adm_upd(cb):
 async def conf_res(cb, state: FSMContext): 
     await state.clear()
     await cb.answer()
+    await cb.message.delete()
     await cb.message.answer("🔄 Все скинуто!", reply_markup=get_start_kb())
 
 @dp.callback_query(F.data == "cancel_res")
