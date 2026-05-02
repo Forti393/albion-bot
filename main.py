@@ -43,6 +43,13 @@ current_mode = "all"
 def get_start_kb():
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⚙️ Ліміт")]], resize_keyboard=True)
 
+def get_search_only_kb():
+    """Тільки дві кнопки після вибору режиму"""
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="🔍 Пошук"), KeyboardButton(text="📱 Меню")]],
+        resize_keyboard=True
+    )
+
 def get_main_kb():
     mode_label = "Всі" if current_mode == "all" else "Шлях"
     extra_label = "🚫 Екстра відміна" if extra_filter_active else "⚡ Екстра тестування"
@@ -98,16 +105,16 @@ def format_time(date_str):
 def get_item_prefix(unique_name, localized_name):
     un = unique_name.lower()
     ln = localized_name.lower()
-    if "shoes" in un or "boots" in un or "ботинки" in ln or "сапоги" in ln: return "🥾"
-    if "armor" in un or "jacket" in un or "robe" in un or "куртка" in ln or "доспех" in ln or "роба" in ln: return "🧥"
+    if any(x in un for x in ["shoes", "boots"]) or any(x in ln for x in ["ботинки", "сапоги"]): return "🥾"
+    if any(x in un for x in ["armor", "jacket", "robe"]) or any(x in ln for x in ["куртка", "доспех", "роба"]): return "🧥"
     if "cape" in un or "плащ" in ln: return "🧣"
-    if "head" in un or "helmet" in un or "hood" in un or "шлем" in ln or "капюшон" in ln: return "👒"
-    if "weapon" in un or "sword" in un or "bow" in un or "staff" in un or "axe" in un or "mace" in un or "dagger" in un or "spear" in un or "hammer" in un: return "🗡️"
-    if "shield" in un or "orb" in un or "book" in un or "torch" in un or "щит" in ln: return "🛡️"
+    if any(x in un for x in ["head", "helmet", "hood"]) or any(x in ln for x in ["шлем", "капюшон"]): return "👒"
+    if any(x in un for x in ["weapon", "sword", "bow", "staff", "axe", "mace", "dagger", "spear", "hammer"]): return "🗡️"
+    if any(x in un for x in ["shield", "orb", "book", "torch"]) or "щит" in ln: return "🛡️"
     if "bag" in un or "сумка" in ln: return "🎒"
-    if "mount" in un or "конь" in ln or "бык" in ln or "олень" in ln: return "🐴"
+    if "mount" in un or any(x in ln for x in ["конь", "бык", "олень"]): return "🐴"
     if "potion" in un or "зелье" in ln: return "🧪"
-    if "meal" in un or "food" in un or "жаркое" in ln or "пирог" in ln or "салат" in ln: return "🍲"
+    if any(x in un for x in ["meal", "food"]) or any(x in ln for x in ["жаркое", "пирог", "салат"]): return "🍲"
     if "glove" in un or "перчатки" in ln: return "🧤"
     return "📦"
 
@@ -115,22 +122,17 @@ async def scan_logic(from_city=None, to_city=None):
     results = []
     item_list = list(items_data.keys())
     search_cities = [from_city, to_city] if from_city and to_city else CITIES
-    if to_city == "Caerleon" and "Black Market" not in search_cities:
-        search_cities.append("Black Market")
-
     async with aiohttp.ClientSession() as session:
         for i in range(0, len(item_list), 50):
             chunk = item_list[i:i + 50]
             url = f"{MARKET_BASE_URL}{MARKET_PATH.format(','.join(chunk), ','.join(search_cities))}"
             async with session.get(url) as resp:
                 data = await resp.json() if resp.status == 200 else []
-            
             grouped = {}
             for e in data:
                 k = f"{e['item_id']}|{e['quality']}"
                 if k not in grouped: grouped[k] = {}
                 grouped[k][e['city']] = e
-
             now = datetime.now(UTC)
             for k, city_data in grouped.items():
                 i_id, qual = k.split("|")
@@ -142,19 +144,16 @@ async def scan_logic(from_city=None, to_city=None):
                     bd_dt = get_dt(city_data[f_city]['sell_price_min_date'])
                     buy_age_mins = (now - bd_dt).total_seconds() / 60
                     if buy_age_mins > 180: continue 
-
                     targets = [to_city] if to_city else [c for c in city_data if c != f_city]
                     for t_city in targets:
                         if t_city not in city_data: continue
                         sd_key = 'buy_price_max_date' if t_city == "Black Market" else 'sell_price_min_date'
                         sell = city_data[t_city].get('buy_price_max' if t_city == "Black Market" else 'sell_price_min', 0)
                         if sell <= buy or (sell/buy) > 10: continue
-                        
                         sd_dt = get_dt(city_data[t_city].get(sd_key))
                         sell_age_mins = (now - sd_dt).total_seconds() / 60
                         if sell_age_mins > 180: continue 
                         if extra_filter_active and (buy_age_mins > 30 or sell_age_mins > 30): continue
-
                         p_p, p_n = int(sell * 0.935 - buy), int(sell * 0.895 - buy)
                         if p_p > 5000:
                             results.append({
@@ -171,8 +170,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(
         "👋 <b>Albion Trader Bot</b>\n\n"
-        "1️⃣ Натисни <b>⚙️ Ліміт</b> для бюджету.\n"
-        "2️⃣ Використовуй <b>🔍 Пошук</b> для сканування.",
+        "Натисни <b>⚙️ Ліміт</b> для бюджету, щоб відкрити функції.",
         reply_markup=get_start_kb(), parse_mode=ParseMode.HTML
     )
 
@@ -197,6 +195,11 @@ async def main_search(message: types.Message, state: FSMContext):
         await message.answer("📍 Шлях. Звідки?", reply_markup=get_city_inline())
         await state.set_state(BotState.picking_from)
 
+@dp.message(F.text == "📱 Меню")
+async def menu_back(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Всі функції доступні:", reply_markup=get_main_kb())
+
 @dp.message(BotState.waiting_for_limit)
 async def handle_limit_input(message: types.Message, state: FSMContext):
     text = message.text.replace(" ","").replace(",","")
@@ -204,8 +207,7 @@ async def handle_limit_input(message: types.Message, state: FSMContext):
         global max_buy_limit
         max_buy_limit = int(text)
         await state.clear()
-        await message.answer(f"✅ Ліміт {max_buy_limit:,} збережено.", reply_markup=get_main_kb())
-        await message.answer("Обери режим:", reply_markup=get_mode_inline())
+        await message.answer(f"✅ Ліміт {max_buy_limit:,} збережено. Обери режим:", reply_markup=get_mode_inline())
     else:
         await message.answer("❌ Введи число!")
 
@@ -213,12 +215,15 @@ async def handle_limit_input(message: types.Message, state: FSMContext):
 async def set_mode(callback: types.CallbackQuery, state: FSMContext):
     global current_mode
     current_mode = callback.data.split("_")[2]
-    await callback.message.answer(f"✅ Режим: {'Всі міста' if current_mode=='all' else 'Шлях'}", reply_markup=get_main_kb())
+    await state.clear()
     if current_mode == "all":
-        res = await scan_logic()
-        await display_results(callback.message, res)
+        await callback.message.answer(
+            "✅ Успішно вибрано → натисніть <b>Пошук</b>", 
+            reply_markup=get_search_only_kb(), 
+            parse_mode=ParseMode.HTML
+        )
     else:
-        await callback.message.answer("📍 Звідки?", reply_markup=get_city_inline())
+        await callback.message.answer("📍 Шлях. Звідки?", reply_markup=get_city_inline())
         await state.set_state(BotState.picking_from)
     await callback.answer()
 
@@ -282,16 +287,12 @@ async def display_results(message, res):
         base_id = item_raw[0]
         enchant = item_raw[1] if len(item_raw) > 1 else "0"
         tier = base_id.split("_")[0].replace("T", "")
-        
         name = items_data.get(base_id, {}).get("LocalizedNames", {}).get("RU-RU", base_id)
-        # Очищення назви від "Знаток", "Мастер" тощо
         for trash in ["Знаток ", "Мастер ", "Великий мастер ", "Старейшина ", "Ученик ", "Новичок "]:
             name = name.replace(trash, "")
-        
         icon = get_item_prefix(base_id, name)
         quality = QUALITY_NAMES.get(r['q'], "Обычное")
         full_name = f"{icon} {name} [{tier}.{enchant}] ({quality})" if enchant != "0" else f"{icon} {name} [{tier}] ({quality})"
-        
         await message.answer(
             f"📦 <b>{full_name}</b>\n"
             f"🛒 Куп: {CITY_EMOJIS[r['from']]} {r['from']} | <b>{r['buy']:,}</b> (⏳{format_time(r['bd'])})\n"
