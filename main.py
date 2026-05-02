@@ -26,7 +26,8 @@ TRASH = ["Знаток ","Мастер ","Великий мастер ","Ста�
 class BotState(StatesGroup):
     waiting_for_buy_limit = State(); waiting_for_profit_limit = State()
     picking_from = State(); picking_to = State()
-    calc_count = State(); calc_buy = State(); calc_sell = State()
+    calc_count = State(); calc_buy = State()
+    calc_sell = State()
 
 # ================= КЛАВІАТУРИ =================
 def get_start_kb(): 
@@ -107,6 +108,7 @@ async def scan_logic(d, f_c=None, t_c=None):
                 if i % 300 == 0: await asyncio.sleep(0.2)
             except: continue
     return res
+
 # ================= ОБРОБНИКИ ПОДІЙ =================
 @dp.message(F.text == "🚀 Запустити сканер", StateFilter('*'))
 async def main_search(m, state: FSMContext):
@@ -150,7 +152,7 @@ async def set_mode_cb(cb, state: FSMContext):
     await cb.message.delete()
     
     if m == "all":
-        await cb.message.answer("🌍 Режим: <b>Всі міста</b> встановлено!\n\n👇 Тисни кнопку нижче:", reply_markup=get_main_kb(d), parse_mode=ParseMode.HTML)
+        await cb.message.answer("🌍 Режим: <b>Всі міста</b> встановлено!", reply_markup=get_main_kb(d), parse_mode=ParseMode.HTML)
         await cb.message.answer("🚀 <b>ЗАПУСТИТИ СКАНЕР</b>", parse_mode=ParseMode.HTML)
     else:
         await state.set_state(BotState.picking_from)
@@ -203,27 +205,48 @@ async def h_limits(m, state: FSMContext):
             await m.answer("🚀 <b>ЗАПУСТИТИ СКАНЕР</b>", parse_mode=ParseMode.HTML)
     except: await m.answer("❌ Тільки цифри!")
 
+# ================= ВИВІД РЕЗУЛЬТАТІВ (ГРУПУВАННЯ) =================
 async def disp_res(msg, res):
     if not res: return
     res.sort(key=lambda x: x['p_n'], reverse=True)
-    for r in res[:15]:
-        b_id = r['id'].split("@")[0]; enc = r['id'].split("@")[1] if "@" in r['id'] else "0"
+    
+    full_text = ""
+    messages = []
+    
+    for idx, r in enumerate(res[:15], 1):
+        b_id = r['id'].split("@")[0]
+        enc = r['id'].split("@")[1] if "@" in r['id'] else "0"
         name = items_data.get(b_id, {}).get("LocalizedNames", {}).get("RU-RU", b_id)
         for t in TRASH: name = name.replace(t, "")
-        text = (f"📦 <b>{name.upper()}</b> <code>[{b_id.split('_')[0][1:]}.{enc}]</code>\n"
-                f"✨ Качество: <b>{QUALITY_NAMES.get(r['q'], 'Обычное')}</b>\n"
-                f"──────────────────\n"
-                f"📥 <b>КУПІВЛЯ:</b> {CITY_EMOJIS[r['from']]} {r['from']}\n"
-                f"💰 Ціна: <code>{r['buy']:,}</code>\n"
-                f"⏳ Оновлено: <b>{fmt_t(r['bd'])}</b> тому\n\n"
-                f"📤 <b>ПРОДАЖ:</b> {CITY_EMOJIS[r['to']]} {r['to']}\n"
-                f"💰 Ціна: <code>{r['sell']:,}</code>\n"
-                f"⏳ Оновлено: <b>{fmt_t(r['sd'])}</b> тому\n"
-                f"──────────────────\n"
-                f"💵 <b>ЧИСТИЙ ПРИБУТОК:</b>\n"
-                f"👑 З Преміумом: <code>+{r['p_p']:,}</code>\n"
-                f"💀 Без Преміуму: <code>+{r['p_n']:,}</code>\n"
-                f"──────────────────")
+        
+        item_text = (
+            f"{idx}) 📦 <b>{name.upper()}</b> <code>[{b_id.split('_')[0][1:]}.{enc}]</code>\n"
+            f"✨ Качество: <b>{QUALITY_NAMES.get(r['q'], 'Обычное')}</b>\n"
+            f"──────────────────\n"
+            f"📥 <b>КУПІВЛЯ:</b> {CITY_EMOJIS[r['from']]} {r['from']}\n"
+            f"💰 Ціна: <code>{r['buy']:,}</code>\n"
+            f"⏳ Оновлено: <b>{fmt_t(r['bd'])}</b> тому\n\n"
+            f"📤 <b>ПРОДАЖ:</b> {CITY_EMOJIS[r['to']]} {r['to']}\n"
+            f"💰 Ціна: <code>{r['sell']:,}</code>\n"
+            f"⏳ Оновлено: <b>{fmt_t(r['sd'])}</b> тому\n"
+            f"──────────────────\n"
+            f"💵 <b>ЧИСТИЙ ПРИБУТОК:</b>\n"
+            f"👑 З Преміумом: <code>+{r['p_p']:,}</code>\n"
+            f"💀 Без Преміуму: <code>+{r['p_n']:,}</code>\n"
+            f"──────────────────\n\n" # Подвійний відступ між лотами
+        )
+        
+        # Перевірка на ліміт довжини повідомлення Telegram (4096 символів)
+        if len(full_text) + len(item_text) > 3900:
+            messages.append(full_text)
+            full_text = item_text
+        else:
+            full_text += item_text
+            
+    if full_text:
+        messages.append(full_text)
+        
+    for text in messages:
         await msg.answer(text, parse_mode=ParseMode.HTML)
 
 @dp.message(F.text.contains("Охоплення") | F.text.contains("Маршрут"), StateFilter('*'))
@@ -256,7 +279,8 @@ async def adm_upd(cb):
 
 @dp.callback_query(F.data == "conf_res")
 async def conf_res(cb, state: FSMContext): 
-    await state.clear(); await cb.answer(); await cb.message.delete(); await cb.message.answer("🔄 Все скинуто!", reply_markup=get_start_kb())
+    await state.clear(); await cb.answer(); await cb.message.delete(); 
+    await cb.message.answer("🔄 Все скинуто! Налаштуй бюджет наново:", reply_markup=get_start_kb())
 
 @dp.callback_query(F.data == "cancel_res")
 async def cancel_res(cb): 
@@ -271,4 +295,3 @@ async def main():
     asyncio.create_task(download_items()); await dp.start_polling(bot)
 
 if __name__ == "__main__": asyncio.run(main())
-
