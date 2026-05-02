@@ -149,11 +149,10 @@ async def set_mode_cb(cb, state: FSMContext):
     await state.update_data(mode=m)
     d = await state.get_data()
     
-    # Видаляємо кнопки вибору режиму, щоб юзер не тикав повторно
     await cb.message.delete()
     
     if m == "all":
-        await cb.message.answer("🌍 Режим: Всі міста", reply_markup=get_main_kb(d))
+        await cb.message.answer("🌍 Режим: Всі міста встановено!\n🚀 Тисни <b>\"Запустити сканер\"</b> для пошуку прибутку.", reply_markup=get_main_kb(d), parse_mode=ParseMode.HTML)
     else:
         await state.set_state(BotState.picking_from)
         await cb.message.answer("📍 Звідки веземо товар?", 
@@ -166,7 +165,6 @@ async def from_cb(cb, state: FSMContext):
     await state.update_data(f_c=c)
     await state.set_state(BotState.picking_to)
     
-    # Видаляємо повідомлення з вибором "Звідки", щоб юзер не тикав повторно
     await cb.message.delete()
     
     await cb.message.answer(f"✅ Звідки: {c}\n📍 Тепер обери куди (Пункт Б):", 
@@ -180,10 +178,9 @@ async def to_cb(cb, state: FSMContext):
     d = await state.get_data()
     await state.set_state(None)
     
-    # Видаляємо повідомлення з вибором "Куди"
     await cb.message.delete()
     
-    await cb.message.answer(f"🚀 Маршрут встановлено: {d['f_c']} ➔ {t}", reply_markup=get_main_kb(d))
+    await cb.message.answer(f"🚀 Маршрут <b>{d['f_c']} ➔ {t}</b> встановлено!\nТисни <b>\"Запустити сканер\"</b> для пошуку прибутку.", reply_markup=get_main_kb(d), parse_mode=ParseMode.HTML)
 
 @dp.message(F.text == "💰 Налаштувати бюджет", StateFilter('*'))
 async def limit_menu(m, state: FSMContext):
@@ -197,7 +194,6 @@ async def limit_menu(m, state: FSMContext):
 async def set_limit_cb(cb, state: FSMContext):
     await cb.answer()
     t = cb.data.split("_")[2]
-    # Видаляємо кнопки налаштувань, щоб не було спаму
     await cb.message.delete()
     
     await state.set_state(BotState.waiting_for_buy_limit if t=="buy" else BotState.waiting_for_profit_limit)
@@ -215,7 +211,7 @@ async def h_limits(m, state: FSMContext):
         if not d.get("mode"):
             await m.answer(f"✅ Збережено: {v:,}\nТепер вибери режим:", reply_markup=get_mode_inline())
         else:
-            await m.answer(f"✅ Збережено: {v:,}", reply_markup=get_main_kb(d))
+            await m.answer(f"✅ Збережено: {v:,}\n🚀 Тисни <b>\"Запустити сканер\"</b> для пошуку.", reply_markup=get_main_kb(d), parse_mode=ParseMode.HTML)
     except: await m.answer("❌ Тільки цифри!")
 
 async def disp_res(msg, res):
