@@ -11,6 +11,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 # ================= НАЛАШТУВАННЯ =================
+ADMIN_ID = 1052964898  # ⚠️ УВАГА! Впиши сюди свій числовий Telegram ID (без лапок)
+
 MARKET_BASE_URL = "https://europe.albion-online-data.com"
 MARKET_PATH = "/api/v2/stats/prices/{}?locations={}"
 ITEMS_URL = "https://raw.githubusercontent.com/ao-data/ao-bin-dumps/master/formatted/items.json"
@@ -40,7 +42,7 @@ dp = Dispatcher()
 items_data = {}
 
 max_buy_limit = 0 
-min_profit_limit = 4000  # Базовий мінімальний прибуток БЕЗ прему
+min_profit_limit = 4000  
 extra_filter_active = False 
 current_mode = None  
 
@@ -59,7 +61,7 @@ def get_main_kb():
             [KeyboardButton(text="🔍 Пошук")],
             [KeyboardButton(text=f"🗺️ Режими ({mode_label})"), KeyboardButton(text=extra_label)],
             [KeyboardButton(text="🧮 Калькулятор"), KeyboardButton(text="⚙️ Ліміт")],
-            [KeyboardButton(text="🔁 Оновити базу")]
+            [KeyboardButton(text="🔄 Перезавантаження")]  # Оновлено назву
         ],
         resize_keyboard=True
     )
@@ -119,11 +121,9 @@ def get_item_prefix(unique_name, localized_name):
     return "📦"
 
 def is_menu_command(text):
-    """Перевіряє, чи є текст командою з кнопок меню (щоб не блокувати їх у станах)"""
-    return any(x in text for x in ["🔍", "🗺️", "⚡", "🚫", "🧮", "⚙️", "🔁", "❓"])
+    return any(x in text for x in ["🔍", "🗺️", "⚡", "🚫", "🧮", "⚙️", "🔄", "❓"])
 
 def to_int(text):
-    """Безпечний парсинг числа (розуміє мінуси)"""
     try: return int(text.replace(" ", "").replace(",", ""))
     except ValueError: return None
 
@@ -191,10 +191,57 @@ async def cmd_help(message: types.Message, state: FSMContext):
         "2️⃣ <b>🔍 Пошук</b> — запускає сканування ринку Альбіону і видає найвигідніші фліпи.\n"
         "3️⃣ <b>🗺️ Режими</b> — можна шукати 'Всі міста' одразу або везти товар по конкретному маршруту (Шлях).\n"
         "4️⃣ <b>⚡ Екстра</b> — жорсткий фільтр за часом. Залишає в списку ціни, оновлені не пізніше ніж 30 хвилин тому.\n"
-        "5️⃣ <b>🧮 Калькулятор</b> — рахує чистий прибуток з партії товару, враховуючи всі податки гри.\n\n"
+        "5️⃣ <b>🧮 Калькулятор</b> — рахує чистий прибуток з партії товару, враховуючи всі податки гри.\n"
+        "6️⃣ <b>🔄 Перезавантаження</b> — скидає всі твої налаштування, якщо бот завис або ти хочеш почати з нуля.\n\n"
         "🚀 <i>Тисни <b>⚙️ Ліміт</b>, щоб встановити бюджет і розпочати роботу.</i>"
     )
     await message.answer(help_text, reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⚙️ Ліміт")]], resize_keyboard=True), parse_mode=ParseMode.HTML)
+
+# ================= ПЕРЕЗАВАНТАЖЕННЯ (АДМІН ТА КОРИСТУВАЧІ) =================
+@dp.message(F.text == "🔄 Перезавантаження")
+async def btn_restart(message: types.Message, state: FSMContext):
+    await state.clear()
+    if message.from_user.id == ADMIN_ID:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📥 Оновити Дані (БД)", callback_data="admin_update")],
+            [InlineKeyboardButton(text="🔄 Рестарт бота", callback_data="confirm_restart")]
+        ])
+        await message.answer("🛠 <b>Панель Адміністратора:</b>\nЩо саме хочеш зробити?", reply_markup=kb, parse_mode=ParseMode.HTML)
+    else:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Так", callback_data="confirm_restart"), InlineKeyboardButton(text="❌ Ні", callback_data="cancel_restart")]
+        ])
+        await message.answer("⚠️ Це скине всі налаштування лімітів та поверне до початку.\nВи впевнені?", reply_markup=kb)
+
+@dp.callback_query(F.data == "admin_update")
+async def do_admin_update(callback: types.CallbackQuery):
+    if callback.from_user.id == ADMIN_ID:
+        await callback.message.edit_text("⏳ Завантажую нові дані з сервера...")
+        await download_items()
+        await callback.message.edit_text("✅ Базу предметів успішно оновлено!")
+    await callback.answer()
+
+@dp.callback_query(F.data == "confirm_restart")
+async def do_restart_yes(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    global max_buy_limit, min_profit_limit, current_mode, extra_filter_active
+    max_buy_limit = 0
+    min_profit_limit = 4000
+    current_mode = None
+    extra_filter_active = False
+    
+    await callback.message.delete()
+    await callback.message.answer(
+        "🔄 <b>Прогрес скинуто!</b>\n\nПочни спочатку, натиснувши <b>⚙️ Ліміт</b>.",
+        reply_markup=get_start_kb(), parse_mode=ParseMode.HTML
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "cancel_restart")
+async def do_restart_no(callback: types.CallbackQuery):
+    await callback.message.delete()
+    await callback.message.answer("❌ Перезавантаження скасовано.", reply_markup=get_main_kb())
+    await callback.answer()
 
 # ================= ОБРОБНИКИ ЛІМІТІВ =================
 @dp.message(F.text == "⚙️ Ліміт")
@@ -216,7 +263,6 @@ async def set_limit_callback(callback: types.CallbackQuery, state: FSMContext):
 @dp.message(BotState.waiting_for_buy_limit)
 async def handle_buy_limit_input(message: types.Message, state: FSMContext):
     if is_menu_command(message.text): return await state.clear()
-    
     val = to_int(message.text)
     if val is not None:
         global max_buy_limit
@@ -232,7 +278,6 @@ async def handle_buy_limit_input(message: types.Message, state: FSMContext):
 @dp.message(BotState.waiting_for_profit_limit)
 async def handle_profit_limit_input(message: types.Message, state: FSMContext):
     if is_menu_command(message.text): return await state.clear()
-    
     val = to_int(message.text)
     if val is not None:
         global min_profit_limit
@@ -245,7 +290,7 @@ async def handle_profit_limit_input(message: types.Message, state: FSMContext):
     else:
         await message.answer("❌ Введи коректне число (можна з мінусом)!")
 
-# ================= ОБРОБНИКИ ПОШУКУ =================
+# ================= ОБРОБНИКИ ПОШУКУ ТА РЕЖИМІВ =================
 @dp.message(F.text == "🔍 Пошук")
 async def main_search(message: types.Message, state: FSMContext):
     await state.clear()
@@ -361,30 +406,4 @@ async def display_results(message, res):
         item_raw = r['id'].split("@")
         base_id = item_raw[0]
         enchant = item_raw[1] if len(item_raw) > 1 else "0"
-        tier = base_id.split("_")[0].replace("T", "")
-        
-        name = items_data.get(base_id, {}).get("LocalizedNames", {}).get("RU-RU", base_id)
-        for trash in TRASH_WORDS: name = name.replace(trash, "")
-        
-        icon = get_item_prefix(base_id, name)
-        quality = QUALITY_NAMES.get(r['q'], "Обычное")
-        full_name = f"{icon} {name} [{tier}.{enchant}] ({quality})" if enchant != "0" else f"{icon} {name} [{tier}] ({quality})"
-        
-        await message.answer(
-            f"📦 <b>{full_name}</b>\n"
-            f"🛒 Куп: {CITY_EMOJIS[r['from']]} {r['from']} | <b>{r['buy']:,}</b> (⏳{format_time(r['bd'])})\n"
-            f"💰 Прод: {CITY_EMOJIS[r['to']]} {r['to']} | <b>{r['sell']:,}</b> (⏳{format_time(r['sd'])})\n"
-            f"👑 П: <b>{r['p_p']:,}</b> | 💀: <b>{r['p_n']:,}</b>", parse_mode=ParseMode.HTML
-        )
-
-@dp.message(F.text == "🔁 Оновити базу")
-async def update_items(message: types.Message):
-    await state.clear() # На випадок якщо ми були в якомусь стані
-    await download_items()
-    await message.answer("✅ Базу оновлено!")
-
-async def main():
-    await download_items()
-    await dp.start_polling(bot)
-
-if __name__ == "__main__": asyncio.run(main())
+        tier  
