@@ -25,10 +25,11 @@ CITY_EMOJIS = {
 QUALITY_NAMES = {1: "Обычное", 2: "Хорошее", 3: "Выдающееся", 4: "Отличное", 5: "Шедевр"}
 
 class BotState(StatesGroup):
-    waiting_for_limit = State()
+    waiting_for_buy_limit = State()
+    waiting_for_profit_limit = State()
     picking_from = State()
     picking_to = State()
-    calc_count = State() # Новий стан для кількості
+    calc_count = State()
     calc_buy = State()
     calc_sell = State()
 
@@ -36,7 +37,9 @@ class BotState(StatesGroup):
 bot = Bot(token=os.environ.get("BOT_TOKEN"))
 dp = Dispatcher()
 items_data = {}
+
 max_buy_limit = 0 
+min_profit_limit = 4000  # Базовий мінімальний прибуток БЕЗ прему
 extra_filter_active = False 
 current_mode = "all" 
 
@@ -62,6 +65,12 @@ def get_main_kb():
         ],
         resize_keyboard=True
     )
+
+def get_limits_inline():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"💰 Ліміт купівлі ({max_buy_limit:,})", callback_data="set_limit_buy")],
+        [InlineKeyboardButton(text=f"📈 Мін. прибуток ({min_profit_limit:,})", callback_data="set_limit_profit")]
+    ])
 
 def get_mode_inline():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -150,8 +159,11 @@ async def scan_logic(from_city=None, to_city=None):
                         sell_age = (now - sd_dt).total_seconds() / 60
                         if sell_age > 180: continue 
                         if extra_filter_active and (buy_age > 30 or sell_age > 30): continue
+                        
                         p_p, p_n = int(sell * 0.935 - buy), int(sell * 0.895 - buy)
-                        if p_p > 5000:
+                        
+                        # ГОЛОВНИЙ ФІЛЬТР: Перевіряємо чистий дохід БЕЗ прему
+                        if p_n >= min_profit_limit:
                             results.append({
                                 'id': i_id, 'q': int(qual), 'from': f_city, 'to': t_city,
                                 'buy': buy, 'sell': sell, 'p_p': p_p, 'p_n': p_n,
@@ -164,45 +176,84 @@ async def scan_logic(from_city=None, to_city=None):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer("👋 <b>Albion Trader Bot</b>\nНатисни <b>⚙️ Ліміт</b> для старту.", reply_markup=get_start_kb(), parse_mode=ParseMode.HTML)
+    await message.answer(
+        "👋 <b>Albion Trader Bot</b>\n\n"
+        "Натисни <b>⚙️ Ліміт</b>, щоб встановити максимальний бюджет покупки.\n"
+        "Після цього відкриється головне меню.",
+        reply_markup=get_start_kb(), parse_mode=ParseMode.HTML
+    )
 
 @dp.message(F.text == "⚙️ Ліміт")
-async def limit_start(message: types.Message, state: FSMContext):
+async def limit_menu(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer("💰 Вкажи макс. ціну покупки:", reply_markup=ReplyKeyboardRemove())
-    await state.set_state(BotState.waiting_for_limit)
+    await message.answer(
+        "⚙️ <b>Налаштування лімітів</b>\n"
+        "Обери, який саме ліміт хочеш змінити:", 
+        reply_markup=get_limits_inline(), parse_mode=ParseMode.HTML
+    )
+
+@dp.callback_query(F.data.startswith("set_limit_"))
+async def set_limit_callback(callback: types.CallbackQuery, state: FSMContext):
+    l_type = callback.data.split("_")[2]
+    if l_type == "buy":
+        await callback.message.edit_text("💰 Вкажи <b>максимальну ціну покупки</b> за 1 предмет:", parse_mode=ParseMode.HTML)
+        await state.set_state(BotState.waiting_for_buy_limit)
+    elif l_type == "profit":
+        await callback.message.edit_text("📈 Вкажи <b>мінімальний чистий прибуток</b> (без преміуму).\n<i>Можна вводити з мінусом, напр. -1000:</i>", parse_mode=ParseMode.HTML)
+        await state.set_state(BotState.waiting_for_profit_limit)
+    await callback.answer()
+
+@dp.message(BotState.waiting_for_buy_limit)
+async def handle_buy_limit_input(message: types.Message, state: FSMContext):
+    if any(x in message.text for x in ["🔍", "🗺️", "⚡", "🚫", "🧮", "⚙️", "🔁", "📱"]):
+        await state.clear()
+        return
+    text = message.text.replace(" ","").replace(",","")
+    if text.isdigit():
+        global max_buy_limit
+        max_buy_limit = int(text)
+        await state.clear()
+        await message.answer(f"✅ Ліміт купівлі <b>{max_buy_limit:,}</b> збережено.", reply_markup=get_main_kb(), parse_mode=ParseMode.HTML)
+    else:
+        await message.answer("❌ Введи тільки число!")
+
+@dp.message(BotState.waiting_for_profit_limit)
+async def handle_profit_limit_input(message: types.Message, state: FSMContext):
+    if any(x in message.text for x in ["🔍", "🗺️", "⚡", "🚫", "🧮", "⚙️", "🔁", "📱"]):
+        await state.clear()
+        return
+    text = message.text.replace(" ","").replace(",","")
+    
+    # Дозволяємо вводити від'ємні числа (наприклад, -1000)
+    is_negative = text.startswith("-") and text[1:].isdigit()
+    
+    if text.isdigit() or is_negative:
+        global min_profit_limit
+        min_profit_limit = int(text)
+        await state.clear()
+        await message.answer(f"✅ Мінімальний прибуток <b>{min_profit_limit:,}</b> збережено.", reply_markup=get_main_kb(), parse_mode=ParseMode.HTML)
+    else:
+        await message.answer("❌ Введи тільки число (дозволяється мінус)!")
 
 @dp.message(F.text == "🔍 Пошук")
 async def main_search(message: types.Message, state: FSMContext):
     await state.clear()
     if max_buy_limit <= 0:
-        await cmd_start(message, state)
+        await message.answer("Спочатку встанови <b>Ліміт купівлі</b>!", parse_mode=ParseMode.HTML)
         return
     if current_mode == "all":
-        await message.answer(f"🔍 Сканую (Ліміт {max_buy_limit:,})...", reply_markup=ReplyKeyboardRemove())
+        await message.answer(f"🔍 Сканую (Ліміт купівлі: {max_buy_limit:,} | Мін. прибуток: {min_profit_limit:,})...", reply_markup=ReplyKeyboardRemove())
         res = await scan_logic()
         await display_results(message, res)
         await message.answer("Завершено.", reply_markup=get_main_kb())
     else:
-        await message.answer("📍 Звідки?", reply_markup=get_city_inline())
+        await message.answer("📍 Шлях. Звідки?", reply_markup=get_city_inline())
         await state.set_state(BotState.picking_from)
 
 @dp.message(F.text == "📱 Меню")
 async def menu_back(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("Головне меню:", reply_markup=get_main_kb())
-
-@dp.message(BotState.waiting_for_limit)
-async def handle_limit_input(message: types.Message, state: FSMContext):
-    text = message.text.replace(" ","")
-    if text.isdigit():
-        global max_buy_limit
-        max_buy_limit = int(text)
-        await state.clear()
-        await message.answer(f"✅ Ліміт {max_buy_limit:,} збережено.", reply_markup=get_main_kb())
-        await message.answer("Обери режим:", reply_markup=get_mode_inline())
-    else:
-        await message.answer("❌ Введи число!")
 
 @dp.callback_query(F.data.startswith("set_mode_"))
 async def set_mode(callback: types.CallbackQuery, state: FSMContext):
@@ -259,7 +310,7 @@ async def calc_cnt(message: types.Message, state: FSMContext):
         await message.answer(f"✅ Кількість: {text}\n💰 <b>Ціна КУПІВЛІ (1 шт):</b>", parse_mode=ParseMode.HTML)
         await state.set_state(BotState.calc_buy)
     else:
-        await message.answer("Введи число!")
+        await message.answer("❌ Введи число!")
 
 @dp.message(BotState.calc_buy)
 async def calc_b(message: types.Message, state: FSMContext):
@@ -269,7 +320,7 @@ async def calc_b(message: types.Message, state: FSMContext):
         await message.answer(f"✅ Купівля: {text}\n📤 <b>Ціна ПРОДАЖУ (1 шт):</b>", parse_mode=ParseMode.HTML)
         await state.set_state(BotState.calc_sell)
     else:
-        await message.answer("Введи число!")
+        await message.answer("❌ Введи число!")
 
 @dp.message(BotState.calc_sell)
 async def calc_s(message: types.Message, state: FSMContext):
@@ -277,7 +328,7 @@ async def calc_s(message: types.Message, state: FSMContext):
     if text.isdigit():
         data = await state.get_data()
         cnt, b, s = data['cnt'], data['b'], int(text)
-        # Рахуємо для всієї партії
+        
         total_p = int(((s * 0.935) - b) * cnt)
         total_n = int(((s * 0.895) - b) * cnt)
         
@@ -289,16 +340,18 @@ async def calc_s(message: types.Message, state: FSMContext):
         )
         await state.clear()
     else:
-        await message.answer("Введи число!")
+        await message.answer("❌ Введи число!")
 
 async def display_results(message, res):
     if not res:
         await message.answer("Нічого не знайдено.")
         return
-    res.sort(key=lambda x: (max(get_dt(x['bd']), get_dt(x['sd'])), x['p_p']), reverse=True)
+    # Сортуємо результати тепер за прибутком без преміуму (p_n)
+    res.sort(key=lambda x: (max(get_dt(x['bd']), get_dt(x['sd'])), x['p_n']), reverse=True)
     for r in res[:15]:
-        base_id = r['id'].split("@")[0]
-        enchant = r['id'].split("@")[1] if "@" in r['id'] else "0"
+        item_raw = r['id'].split("@")
+        base_id = item_raw[0]
+        enchant = item_raw[1] if len(item_raw) > 1 else "0"
         tier = base_id.split("_")[0].replace("T", "")
         name = items_data.get(base_id, {}).get("LocalizedNames", {}).get("RU-RU", base_id)
         for trash in ["Знаток ", "Мастер ", "Великий мастер ", "Старейшина ", "Ученик ", "Новичок "]: name = name.replace(trash, "")
