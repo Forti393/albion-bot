@@ -45,6 +45,7 @@ max_buy_limit = 0
 min_profit_limit = 4000  
 extra_filter_active = False 
 current_mode = None  
+is_db_ready = False  # Індикатор готовності бази
 
 # ================= КЛАВІАТУРИ =================
 def get_start_kb():
@@ -84,9 +85,11 @@ def get_city_inline(exclude_city=None):
 
 # ================= ЛОГІКА ДАНИХ =================
 async def download_items():
-    global items_data
+    global items_data, is_db_ready
+    is_db_ready = False
     try:
-        async with aiohttp.ClientSession() as session:
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(ITEMS_URL) as resp:
                 if resp.status == 200:
                     raw_data = await resp.json(content_type=None)
@@ -95,8 +98,11 @@ async def download_items():
                         i["UniqueName"]: i for i in raw_data 
                         if i.get("UniqueName", "").startswith(("T4_", "T5_", "T6_", "T7_", "T8_")) and any(x in i.get("UniqueName", "").lower() for x in allowed)
                     }
+                    print("База успішно завантажена!")
     except Exception as e:
         print(f"Помилка завантаження бази предметів: {e}")
+    finally:
+        is_db_ready = True  # Відкриваємо доступ до пошуку
 
 def get_dt(date_str):
     if not date_str or date_str.startswith("0001"): return datetime(1970, 1, 1, tzinfo=UTC)
@@ -124,6 +130,9 @@ def get_item_prefix(unique_name, localized_name):
     if "glove" in un or "перчатки" in ln: return "🧤"
     return "📦"
 
+def is_menu_command(text):
+    return text and any(x in text for x in ["🔍", "🗺️", "⚡", "🚫", "🧮", "⚙️", "🔄", "❓"])
+
 def to_int(text):
     try: return int(text.replace(" ", "").replace(",", ""))
     except ValueError: return None
@@ -132,11 +141,17 @@ async def scan_logic(from_city=None, to_city=None):
     results = []
     item_list = list(items_data.keys())
     search_cities = [from_city, to_city] if from_city and to_city else CITIES
-    async with aiohttp.ClientSession() as session:
+    
+    timeout = aiohttp.ClientTimeout(total=45)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         for i in range(0, len(item_list), 50):
             url = f"{MARKET_BASE_URL}{MARKET_PATH.format(','.join(item_list[i:i + 50]), ','.join(search_cities))}"
-            async with session.get(url) as resp:
-                data = await resp.json() if resp.status == 200 else []
+            try:
+                async with session.get(url) as resp:
+                    data = await resp.json() if resp.status == 200 else []
+            except Exception:
+                continue # Якщо якийсь пакет відвалився - просто йдемо далі
+                
             grouped = {f"{e['item_id']}|{e['quality']}": {} for e in data}
             for e in data: grouped[f"{e['item_id']}|{e['quality']}"][e['city']] = e
             
@@ -206,6 +221,9 @@ async def limit_menu(message: types.Message, state: FSMContext):
 @dp.message(F.text == "🔍 Пошук", StateFilter('*'))
 async def main_search(message: types.Message, state: FSMContext):
     await state.clear()
+    if not is_db_ready:
+        return await message.answer("⏳ <b>База ще завантажується!</b> Зачекай кілька секунд і спробуй знову...", parse_mode=ParseMode.HTML)
+    
     if max_buy_limit <= 0:
         return await message.answer("Спочатку встанови <b>Ліміт купівлі</b>!", parse_mode=ParseMode.HTML)
     if current_mode is None:
@@ -263,8 +281,8 @@ async def btn_restart(message: types.Message, state: FSMContext):
 async def do_admin_update(callback: types.CallbackQuery):
     if callback.from_user.id == ADMIN_ID:
         await callback.message.edit_text("⏳ Завантажую нові дані з сервера...")
-        await download_items()
-        await callback.message.edit_text("✅ Базу предметів успішно оновлено!")
+        asyncio.create_task(download_items())
+        await callback.message.edit_text("✅ Запит на оновлення бази відправлено у фон!")
     await callback.answer()
 
 @dp.callback_query(F.data == "confirm_restart")
@@ -331,6 +349,7 @@ async def to_city(callback: types.CallbackQuery, state: FSMContext):
 # ================= ОБРОБНИКИ СТАНІВ ВВОДУ ЦИФР =================
 @dp.message(BotState.waiting_for_buy_limit)
 async def handle_buy_limit_input(message: types.Message, state: FSMContext):
+    if is_menu_command(message.text): return await state.clear()
     val = to_int(message.text)
     if val is not None:
         global max_buy_limit
@@ -345,6 +364,7 @@ async def handle_buy_limit_input(message: types.Message, state: FSMContext):
 
 @dp.message(BotState.waiting_for_profit_limit)
 async def handle_profit_limit_input(message: types.Message, state: FSMContext):
+    if is_menu_command(message.text): return await state.clear()
     val = to_int(message.text)
     if val is not None:
         global min_profit_limit
@@ -359,6 +379,7 @@ async def handle_profit_limit_input(message: types.Message, state: FSMContext):
 
 @dp.message(BotState.calc_count)
 async def calc_cnt(message: types.Message, state: FSMContext):
+    if is_menu_command(message.text): return await state.clear()
     val = to_int(message.text)
     if val is not None and val > 0:
         await state.update_data(cnt=val)
@@ -369,38 +390,11 @@ async def calc_cnt(message: types.Message, state: FSMContext):
 
 @dp.message(BotState.calc_buy)
 async def calc_b(message: types.Message, state: FSMContext):
+    if is_menu_command(message.text): return await state.clear()
     val = to_int(message.text)
     if val is not None:
         await state.update_data(b=val)
         await message.answer(f"✅ Купівля: {val:,}\n📤 <b>Ціна ПРОДАЖУ (1 шт):</b>", parse_mode=ParseMode.HTML)
         await state.set_state(BotState.calc_sell)
     else:
-        await message.answer("❌ Введи число!")
-
-@dp.message(BotState.calc_sell)
-async def calc_s(message: types.Message, state: FSMContext):
-    val = to_int(message.text)
-    if val is not None:
-        data = await state.get_data()
-        cnt, b, s = data['cnt'], data['b'], val
-        total_p = int(((s * 0.935) - b) * cnt)
-        total_n = int(((s * 0.895) - b) * cnt)
         await message.answer(
-            f"📊 <b>Результат для {cnt} шт:</b>\n"
-            f"👑 П: <b>{total_p:,}</b>\n"
-            f"💀 Б: <b>{total_n:,}</b>", 
-            reply_markup=get_main_kb(), parse_mode=ParseMode.HTML
-        )
-        await state.clear()
-    else:
-        await message.answer("❌ Введи число!")
-
-async def display_results(message, res):
-    if not res:
-        return await message.answer("Нічого не знайдено.")
-    res.sort(key=lambda x: (max(get_dt(x['bd']), get_dt(x['sd'])), x['p_n']), reverse=True)
-    for r in res[:15]:
-        item_raw = r['id'].split("@")
-        base_id = item_raw[0]
-        enchant = item_raw[1] if len(item_raw) > 1 else "0"
-        tier = base_id.split("_")
