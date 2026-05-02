@@ -486,9 +486,9 @@ async def h_limits(m, state: FSMContext):
         await state.update_data(profit_limit=value)
         await m.answer(f"✅ Мінімальний профіт: {value:,}")
 
-    d = await state.get_data()
     await state.set_state(None)
-    await m.answer("Збережено ✔", reply_markup=get_main_kb(d))
+    d = await state.get_data()
+    await m.answer("Готово ✔", reply_markup=get_main_kb(d))
 
 
 # ================= ФІЛЬТР 30 ХВ =================
@@ -608,6 +608,22 @@ async def calc_sell(m, state: FSMContext):
     )
 
 
+# ================= ДОПОМОГА =================
+@dp.message(F.text == "❓ Допомога", StateFilter("*"))
+async def help_msg(m, state: FSMContext):
+    await state.set_state(None)
+    d = await state.get_data()
+    await m.answer(
+        "ℹ️ <b>Як користуватись ботом:</b>\n\n"
+        "1) Натисни «💰 Налаштувати бюджет» і введи свій максимум.\n"
+        "2) Обери режим: всі міста або маршрут.\n"
+        "3) Натисни «🚀 Запустити сканер».\n\n"
+        "Бот покаже найвигідніші угоди з урахуванням податків.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=get_main_kb(d),
+    )
+
+
 # ================= КНОПКИ РЕЖИМУ =================
 @dp.message(F.text.contains("Охоплення") | F.text.contains("Маршрут"), StateFilter("*"))
 async def modes_btn(m):
@@ -630,4 +646,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
