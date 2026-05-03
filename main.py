@@ -169,22 +169,24 @@ async def disp_res(msg, res, d):
         
         tbd, tsd = fmt_t(r.get('bd')), fmt_t(r.get('sd'))
         
-        # Форматування блоку Прибуток + Попит
-        p_p_str = f"{r['p_p']:,}"
-        p_n_str = f"{r['p_n']:,}"
-        vol_str = f"{r.get('vol', 0)}"
-        
+        # Форматування блоку прибутку та попиту
+        p_p_f, p_n_f = f"{r['p_p']:,}", f"{r['p_n']:,}"
         if show_liq:
+            vol_f = f"{r.get('vol', 0)} шт/д"
+            # Створюємо таблицю: ліва частина (прибуток), права частина (попит)
+            # <pre> підтримує фіксовану ширину символів
             profit_block = (
-                f"Прибуток:           Попит:\n"
-                f"👑 {p_p_str:<17} 📊 {vol_str}\n"
-                f"💀 {p_n_str:<17} шт/д"
+                f"<pre>"
+                f"👑 {p_p_f:<11} │ 📊 Попит:\n"
+                f"💀 {p_n_f:<11} │ {vol_f}"
+                f"</pre>"
             )
         else:
             profit_block = (
-                f"Прибуток:\n"
-                f"👑 {p_p_str}\n"
-                f"💀 {p_n_str}"
+                f"<pre>"
+                f"👑 Пр: {p_p_f}\n"
+                f"💀 Пр: {p_n_f}"
+                f"</pre>"
             )
 
         item_block = (
@@ -192,9 +194,7 @@ async def disp_res(msg, res, d):
             f"✨ {QUALITY_NAMES.get(r['q'], 'Обычное')}\n"
             f"📥 {CITY_EMOJIS[r['from']]} {r['buy']:,} | 🕒 {tbd}\n"
             f"📤 {CITY_EMOJIS[r['to']]} {r['sell']:,} | 🕒 {tsd}\n"
-            f"<pre>"
-            f"{profit_block}"
-            f"</pre>\n\n"
+            f"{profit_block}\n"
         )
         
         if len(full_text) + len(item_block) > 3900: 
@@ -215,7 +215,7 @@ def get_main_kb(d):
 
 @dp.message(F.text == "🚀 Запустити сканер", StateFilter('*'))
 async def main_search(m, state: FSMContext):
-    d = await state.get_data()
+    u_id = m.from_user.id; d = await state.get_data()
     if not is_db_ready: return await m.answer("⏳ БД вантажиться...")
     if d.get("buy_limit", 0) <= 0: return await m.answer("⚠️ Встанови бюджет!")
     if not d.get("mode"): return await m.answer("🗺️ Обери режим!")
