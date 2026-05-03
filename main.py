@@ -32,21 +32,28 @@ class BotState(StatesGroup):
     picking_from = State(); picking_to = State()
     calc_count = State(); calc_buy = State(); calc_sell = State()
 
-# ================= ФОНОВЕ ОЧИЩЕННЯ ПАМ'ЯТІ =================
+# ================= ФОНОВІ ТА ДОПОМІЖНІ ФУНКЦІЇ =================
 async def cleanup_cooldowns():
     while True:
         await asyncio.sleep(600)
         try:
             now = datetime.now()
             expired = [uid for uid, dt in user_cooldowns.items() if (now - dt).total_seconds() > 3600]
-            for uid in expired:
-                del user_cooldowns[uid]
-            if expired:
-                logger.info(f"Очищено {len(expired)} старих кулдаунів")
-        except Exception as e:
-            logger.error(f"Помилка cleanup: {e}")
+            for uid in expired: del user_cooldowns[uid]
+            if expired: logger.info(f"Очищено {len(expired)} старих кулдаунів")
+        except Exception as e: logger.error(f"Помилка cleanup: {e}")
 
-# ================= ФУНКЦІЇ ВІЗУАЛУ =================
+async def safe_delete(msg):
+    """Безпечне видалення повідомлення, щоб уникнути крашу бота при подвійних кліках"""
+    try: await msg.delete()
+    except Exception: pass
+
+async def set_bot_commands():
+    commands = [
+        types.BotCommand(command="start", description="🚀 Перезапустити бота / Головне меню")
+    ]
+    await bot.set_my_commands(commands)
+
 def get_item_icon(unique_name):
     un = unique_name.lower()
     if any(x in un for x in ["hood", "cowl", "helmet", "cap"]): return "🪖"
@@ -58,6 +65,7 @@ def get_item_icon(unique_name):
     if "mount" in un: return "🐴"
     return "📦"
 
+# ================= КЛАВІАТУРИ =================
 def get_start_kb(): 
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❓ Допомога"), KeyboardButton(text="💰 Налаштувати бюджет")]], resize_keyboard=True)
 
@@ -150,6 +158,7 @@ async def main_search(m, state: FSMContext):
     u_id, now = m.from_user.id, datetime.now()
     is_admin = (u_id == ADMIN_ID)
     d = await state.get_data()
+    
     if not is_admin:
         if u_id in active_scans: return await m.answer("⚠️ Твій запит ще обробляється!")
         if u_id in user_cooldowns and (now - user_cooldowns[u_id]).total_seconds() < 25:
@@ -163,20 +172,23 @@ async def main_search(m, state: FSMContext):
     if not mode: return await m.answer("🗺️ Обери режим!", reply_markup=get_mode_inline())
 
     if is_admin:
+        logger.info(f"Адмін запуcтив скан (Маршрут: {d.get('f_c', 'All')} -> {d.get('t_c', 'All')})")
         s_msg = await m.answer("⚡ <b>Адмін-сканування...</b>", parse_mode=ParseMode.HTML, reply_markup=ReplyKeyboardRemove())
         res = await scan_logic(d, d.get('f_c'), d.get('t_c'))
-        await s_msg.delete()
+        await safe_delete(s_msg)
         if not res: await m.answer("📭 Нічого не знайдено.\nАбо ринок порожній під твої ліміти, або сервери Альбіону тимчасово не відповідають.", reply_markup=get_main_kb(d))
         else: await disp_res(m, res); await m.answer(f"✅ Угод: {len(res)}", reply_markup=get_main_kb(d))
     else:
         async with scan_semaphore:
             active_scans.add(u_id); user_cooldowns[u_id] = now
-            s_msg = await m.answer("🔍 Сканую Європу...", reply_markup=ReplyKeyboardRemove())
-            res = await scan_logic(d, d.get('f_c'), d.get('t_c'))
-            await s_msg.delete()
-            if not res: await m.answer("📭 Нічого не знайдено.\nАбо ринок порожній під твої ліміти, або сервери Альбіону тимчасово не відповідають.", reply_markup=get_main_kb(d))
-            else: await disp_res(m, res); await m.answer(f"✅ Готово! Знайдено: {len(res)}", reply_markup=get_main_kb(d))
-            active_scans.remove(u_id)
+            try:
+                s_msg = await m.answer("🔍 Сканую Європу...", reply_markup=ReplyKeyboardRemove())
+                res = await scan_logic(d, d.get('f_c'), d.get('t_c'))
+                await safe_delete(s_msg)
+                if not res: await m.answer("📭 Нічого не знайдено.\nАбо ринок порожній під твої ліміти, або сервери Альбіону тимчасово не відповідають.", reply_markup=get_main_kb(d))
+                else: await disp_res(m, res); await m.answer(f"✅ Готово! Знайдено: {len(res)}", reply_markup=get_main_kb(d))
+            finally:
+                active_scans.discard(u_id) # Надійне розблокування користувача
 
 @dp.message(F.text == "💰 Налаштувати бюджет", StateFilter('*'))
 async def limit_menu(m, state: FSMContext):
@@ -192,7 +204,7 @@ async def limit_menu(m, state: FSMContext):
 @dp.callback_query(F.data.startswith("set_limit_"), StateFilter('*'))
 async def set_limit_cb(cb, state: FSMContext):
     try:
-        await cb.answer(); t = cb.data.split("_")[2]; await cb.message.delete()
+        await cb.answer(); t = cb.data.split("_")[2]; await safe_delete(cb.message)
         cancel_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❌ Скасувати")]], resize_keyboard=True)
         if t == "buy":
             await state.set_state(BotState.waiting_for_buy_limit)
@@ -247,7 +259,7 @@ async def h_limits(m, state: FSMContext):
 async def set_mode_cb(cb, state: FSMContext):
     try:
         await cb.answer(); m = cb.data.split("_")[2]
-        await state.update_data(mode=m); d = await state.get_data(); await cb.message.delete()
+        await state.update_data(mode=m); d = await state.get_data(); await safe_delete(cb.message)
         if m == "all": 
             await cb.message.answer("🌍 Режим: <b>Всі міста</b> встановлено!\n\n🚀 Тисни <b>\"Запустити сканер\"</b>", reply_markup=get_main_kb(d), parse_mode=ParseMode.HTML)
         else:
@@ -258,14 +270,14 @@ async def set_mode_cb(cb, state: FSMContext):
 @dp.callback_query(StateFilter(BotState.picking_from), F.data.startswith("city_"))
 async def from_cb(cb, state: FSMContext):
     try:
-        await cb.answer(); c = cb.data.split("_")[1]; await state.update_data(f_c=c); await state.set_state(BotState.picking_to); await cb.message.delete()
+        await cb.answer(); c = cb.data.split("_")[1]; await state.update_data(f_c=c); await state.set_state(BotState.picking_to); await safe_delete(cb.message)
         await cb.message.answer(f"✅ Звідки: {c}\n📍 Тепер обери куди (Пункт Б):", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{CITY_EMOJIS[ci]} {ci}", callback_data=f"city_{ci}")] for ci in CITIES if ci!=c and ci!="Black Market"]))
     except Exception as e: logger.error(f"Помилка в from_cb: {e}")
 
 @dp.callback_query(StateFilter(BotState.picking_to), F.data.startswith("city_"))
 async def to_cb(cb, state: FSMContext):
     try:
-        await cb.answer(); t = cb.data.split("_")[1]; await state.update_data(t_c=t, mode="custom"); d = await state.get_data(); await state.set_state(None); await cb.message.delete()
+        await cb.answer(); t = cb.data.split("_")[1]; await state.update_data(t_c=t, mode="custom"); d = await state.get_data(); await state.set_state(None); await safe_delete(cb.message)
         await cb.message.answer(f"🚀 Маршрут <b>{d['f_c']} ➔ {t}</b> встановлено!\n\n🚀 Тисни <b>\"Запустити сканер\"</b>", reply_markup=get_main_kb(d), parse_mode=ParseMode.HTML)
     except Exception as e: logger.error(f"Помилка в to_cb: {e}")
 
@@ -307,21 +319,23 @@ async def adm_upd(cb):
     await cb.answer()
 
 @dp.callback_query(F.data == "conf_res")
-async def conf_res(cb, state: FSMContext): await state.clear(); await cb.answer(); await cb.message.delete(); await cb.message.answer("🔄 Все скинуто!", reply_markup=get_start_kb())
+async def conf_res(cb, state: FSMContext): await state.clear(); await cb.answer(); await safe_delete(cb.message); await cb.message.answer("🔄 Все скинуто!", reply_markup=get_start_kb())
 
 @dp.callback_query(F.data == "cancel_res")
-async def cancel_res(cb): await cb.answer(); await cb.message.delete()
+async def cancel_res(cb): await cb.answer(); await safe_delete(cb.message)
 
 @dp.message(Command("start"), StateFilter('*'))
 async def cmd_start(m, state: FSMContext): await state.clear(); await m.answer("👋 Бот готовий!", reply_markup=get_start_kb())
 
 async def main():
     if ADMIN_ID == 0:
-        logger.warning("⚠️ ADMIN_ID не встановлена! Адмін-функції відключені.")
+        logger.warning("⚠️ ADMIN_ID не встановлена! Функції адміна будуть недоступні.")
         
+    await set_bot_commands() # Додаємо меню команд в Telegram
     await bot.delete_webhook(drop_pending_updates=True)
     asyncio.create_task(download_items())
     asyncio.create_task(cleanup_cooldowns())
     await dp.start_polling(bot)
 
 if __name__ == "__main__": asyncio.run(main())
+
