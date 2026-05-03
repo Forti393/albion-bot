@@ -186,7 +186,7 @@ async def disp_res(msg, res, d):
             f"{idx}) {icon} <b>{name}</b> [{tier}.{enc}]\n"
             f"✨ {QUALITY_NAMES.get(r['q'], 'Обычное')}\n"
             f"📥 {CITY_EMOJIS[r['from']]} {r['buy']:,}\n"
-            f"📤 {CITY_EMOJIS[r['to']]} {r['sell']:,}\n"
+            f"📤 {CITY_EMOJIS[r['to']]} {r['sell']:,}\n\n"
             f"<pre>"
             f"             👑 {r['p_p']:,}   |   {tbd}\n"
             f"💵 Пр:\n"
@@ -239,22 +239,17 @@ async def choose_mode(m, state):
 @dp.callback_query(F.data.startswith("set_mode_"))
 async def set_mode_cb(cb, state: FSMContext):
     m = cb.data.split("_")[2]; await state.update_data(mode=m); await cb.answer()
-    logger.info(f"Режим змінено на: {m}")
     if m == "all": await cb.message.answer("🌍 Всі міста!", reply_markup=get_main_kb(await state.get_data()))
     else: await state.set_state(BotState.picking_from); await cb.message.answer("Звідки:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{CITY_EMOJIS[c]} {c}", callback_data=f"city_{c}")] for c in CITIES if c!="Black Market"]))
 
-# ВИПРАВЛЕНО: Більш надійний обробник вибору міста
 @dp.callback_query(F.data.startswith("city_"))
 async def city_pick(cb, state: FSMContext):
     await cb.answer()
-    curr = await state.get_state()
-    if not curr: return
-    
-    c = cb.data.split("_")[1]
-    if "picking_from" in str(curr):
+    curr = await state.get_state(); c = cb.data.split("_")[1]
+    if curr == BotState.picking_from:
         await state.update_data(f_c=c); await state.set_state(BotState.picking_to)
         await cb.message.edit_text(f"З: {c}. Куди:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{CITY_EMOJIS[ci]} {ci}", callback_data=f"city_{ci}")] for ci in CITIES if ci!=c and ci!="Black Market"]))
-    elif "picking_to" in str(curr):
+    elif curr == BotState.picking_to:
         await state.update_data(t_c=c, mode="custom"); await state.set_state(None)
         await cb.message.answer("✅ Готово!", reply_markup=get_main_kb(await state.get_data()))
 
@@ -279,6 +274,12 @@ async def h_limits(m, state: FSMContext):
 
 @dp.message(F.text == "🔄 Перезавантаження", StateFilter('*'))
 async def btn_res(m, state: FSMContext): await state.clear(); await m.answer("🔄 Скинуто!", reply_markup=get_main_kb({}))
+
+# --- ФІКС "ДОПОМОГИ" ---
+@dp.message(Command("help"), StateFilter('*'))
+@dp.message(F.text.contains("Допомога"), StateFilter('*')) # Тепер ловить будь-який текст, де є це слово
+async def cmd_help(m, state: FSMContext):
+    await m.answer("📖 <b>Інструкція:</b>\n1. Налаштуй бюджет.\n2. Обери режим (Всі міста або Шлях).\n3. Тисни Сканер.\n⚡ 30хв — фільтрує старі ціни.\n📊 Попит — показує об'єм торгів за добу.", parse_mode=ParseMode.HTML)
 
 @dp.message(Command("start"), StateFilter('*'))
 async def cmd_start(m, state: FSMContext): await state.clear(); await m.answer("👋 Бот готовий!", reply_markup=get_main_kb({}))
