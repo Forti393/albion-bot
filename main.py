@@ -13,7 +13,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ================= НАЛАШТУВАННЯ =================
-# Більше ніяких хардкодів. Тепер ADMIN_ID береться з Railway (Variables)
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0")) 
 
 bot = Bot(token=os.environ.get("BOT_TOKEN"))
@@ -35,13 +34,17 @@ class BotState(StatesGroup):
 
 # ================= ФОНОВЕ ОЧИЩЕННЯ ПАМ'ЯТІ =================
 async def cleanup_cooldowns():
-    """Чистить старі записи кулдаунів, щоб не було витоку пам'яті"""
     while True:
-        await asyncio.sleep(600) # Запускаємо кожні 10 хвилин
-        now = datetime.now()
-        for uid in list(user_cooldowns.keys()):
-            if (now - user_cooldowns[uid]).total_seconds() > 3600: # Видаляємо старші за 1 годину
+        await asyncio.sleep(600)
+        try:
+            now = datetime.now()
+            expired = [uid for uid, dt in user_cooldowns.items() if (now - dt).total_seconds() > 3600]
+            for uid in expired:
                 del user_cooldowns[uid]
+            if expired:
+                logger.info(f"Очищено {len(expired)} старих кулдаунів")
+        except Exception as e:
+            logger.error(f"Помилка cleanup: {e}")
 
 # ================= ФУНКЦІЇ ВІЗУАЛУ =================
 def get_item_icon(unique_name):
@@ -79,6 +82,7 @@ def get_mode_inline():
 # ================= ЛОГІКА СКАНУВАННЯ =================
 async def download_items():
     global items_data, is_db_ready
+    start_time = datetime.now()
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get("https://raw.githubusercontent.com/ao-data/ao-bin-dumps/master/formatted/items.json", timeout=60) as r:
@@ -86,7 +90,7 @@ async def download_items():
                     data = await r.json(content_type=None)
                     allowed = ["weapon","armor","plate","leather","cloth","bag","cape","potion","meal","mount","tool","shapeshifter","offhand"]
                     items_data = {i["UniqueName"]: i for i in data if i.get("UniqueName","").startswith(("T4_","T5_","T6_","T7_","T8_")) and any(x in i.get("UniqueName","").lower() for x in allowed)}
-                    logger.info(f"БД завантажена: {len(items_data)} шт.")
+                    logger.info(f"✅ БД завантажена: {len(items_data)} шт. за {(datetime.now()-start_time).total_seconds():.2f}с")
     except Exception as e: logger.error(f"Помилка БД: {e}")
     finally: is_db_ready = True
 
@@ -106,8 +110,11 @@ async def scan_logic(d, f_c=None, t_c=None):
             url = f"https://europe.albion-online-data.com/api/v2/stats/prices/{','.join(i_list[i:i+50])}?locations={','.join(cities)}"
             try:
                 async with s.get(url, timeout=20) as resp:
-                    if resp.status != 200: continue
+                    if resp.status != 200:
+                        logger.warning(f"API статус {resp.status}")
+                        continue
                     data = await resp.json()
+                    if not data: continue
                 now = datetime.now(UTC)
                 grouped = {}
                 for e in data:
@@ -133,7 +140,9 @@ async def scan_logic(d, f_c=None, t_c=None):
                                 if ext and ((now-b_dt).total_seconds()/60 > 30 or (now-s_dt).total_seconds()/60 > 30): continue
                                 res.append({'id':i_id,'q':int(q),'from':sc,'to':tc,'buy':buy,'sell':sell,'p_p':int(sell*0.935-buy),'p_n':p_n,'bd':c_d[sc]['sell_price_min_date'],'sd':c_d[tc].get(sk)})
                 if i % 300 == 0: await asyncio.sleep(0.2)
-            except: continue
+            except Exception as e:
+                logger.warning(f"Помилка API запиту: {e}")
+                continue
     return res
 # ================= ОБРОБНИКИ ПОДІЙ =================
 @dp.message(F.text == "🚀 Запустити сканер", StateFilter('*'))
@@ -146,7 +155,7 @@ async def main_search(m, state: FSMContext):
         if u_id in user_cooldowns and (now - user_cooldowns[u_id]).total_seconds() < 25:
             return await m.answer(f"⏳ Зачекай {int(25-(now-user_cooldowns[u_id]).total_seconds())} сек.")
 
-    if not is_db_ready: return await m.answer("⏳ База вантажиться...")
+    if not is_db_ready: return await m.answer("⏳ База ще вантажиться, зачекай пару секунд...")
     b = d.get("buy_limit", 0)
     if b <= 0: return await m.answer("💰 Встанови бюджет у меню!")
     
@@ -157,7 +166,7 @@ async def main_search(m, state: FSMContext):
         s_msg = await m.answer("⚡ <b>Адмін-сканування...</b>", parse_mode=ParseMode.HTML, reply_markup=ReplyKeyboardRemove())
         res = await scan_logic(d, d.get('f_c'), d.get('t_c'))
         await s_msg.delete()
-        if not res: await m.answer("📭 Нічого не знайдено.", reply_markup=get_main_kb(d))
+        if not res: await m.answer("📭 Нічого не знайдено.\nАбо ринок порожній під твої ліміти, або сервери Альбіону тимчасово не відповідають.", reply_markup=get_main_kb(d))
         else: await disp_res(m, res); await m.answer(f"✅ Угод: {len(res)}", reply_markup=get_main_kb(d))
     else:
         async with scan_semaphore:
@@ -165,7 +174,7 @@ async def main_search(m, state: FSMContext):
             s_msg = await m.answer("🔍 Сканую Європу...", reply_markup=ReplyKeyboardRemove())
             res = await scan_logic(d, d.get('f_c'), d.get('t_c'))
             await s_msg.delete()
-            if not res: await m.answer("📭 Нічого не знайдено.", reply_markup=get_main_kb(d))
+            if not res: await m.answer("📭 Нічого не знайдено.\nАбо ринок порожній під твої ліміти, або сервери Альбіону тимчасово не відповідають.", reply_markup=get_main_kb(d))
             else: await disp_res(m, res); await m.answer(f"✅ Готово! Знайдено: {len(res)}", reply_markup=get_main_kb(d))
             active_scans.remove(u_id)
 
@@ -307,9 +316,12 @@ async def cancel_res(cb): await cb.answer(); await cb.message.delete()
 async def cmd_start(m, state: FSMContext): await state.clear(); await m.answer("👋 Бот готовий!", reply_markup=get_start_kb())
 
 async def main():
+    if ADMIN_ID == 0:
+        logger.warning("⚠️ ADMIN_ID не встановлена! Адмін-функції відключені.")
+        
     await bot.delete_webhook(drop_pending_updates=True)
     asyncio.create_task(download_items())
-    asyncio.create_task(cleanup_cooldowns()) # Запускаємо фонове очищення
+    asyncio.create_task(cleanup_cooldowns())
     await dp.start_polling(bot)
 
 if __name__ == "__main__": asyncio.run(main())
