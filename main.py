@@ -1,7 +1,7 @@
 import os, json, aiohttp, asyncio, re, logging, time
 from datetime import datetime, UTC, timedelta
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.enums import ParseMode
+from aiogram.enums import ParseMode, ChatAction
 from aiogram.filters import Command, StateFilter
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
@@ -18,6 +18,7 @@ bot = Bot(token=os.environ.get("BOT_TOKEN"))
 dp = Dispatcher(storage=MemoryStorage())
 
 items_data = {}; is_db_ready = False
+http_session = None # Глобальна сесія для швидких запитів
 scan_semaphore = asyncio.Semaphore(3) 
 active_scans_lock = asyncio.Lock() 
 user_cooldowns = {}; active_scans = set() 
@@ -66,7 +67,7 @@ def get_item_icon(unique_name):
     if "mount" in un: return "🐴"
     return "📦"
 
-# ================= ОНОВЛЕНІ КЛАВІАТУРИ =================
+# ================= КЛАВІАТУРИ =================
 def get_start_kb():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="❓ Допомога"), KeyboardButton(text="💰 Налаштувати бюджет")]
@@ -74,7 +75,6 @@ def get_start_kb():
 
 def get_main_kb(d):
     m = d.get("mode")
-    # Компактна версія, якщо режим не встановлено
     if not m:
         return ReplyKeyboardMarkup(keyboard=[
             [KeyboardButton(text="❓ Допомога"), KeyboardButton(text="💰 Налаштувати бюджет")],
@@ -98,16 +98,16 @@ def get_mode_inline():
 
 # ================= ЛОГІКА СКАНУВАННЯ =================
 async def download_items():
-    global items_data, is_db_ready
+    global items_data, is_db_ready, http_session
     start_time = datetime.now()
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get("https://raw.githubusercontent.com/ao-data/ao-bin-dumps/master/formatted/items.json", timeout=60, headers=HEADERS) as r:
-                if r.status == 200:
-                    data = await r.json(content_type=None)
-                    allowed = ["weapon","armor","plate","leather","cloth","bag","cape","potion","meal","mount","tool","shapeshifter","offhand"]
-                    items_data = {i["UniqueName"]: i for i in data if i.get("UniqueName","").startswith(("T4_","T5_","T6_","T7_","T8_")) and any(x in i.get("UniqueName","").lower() for x in allowed)}
-                    logger.info(f"✅ БД завантажена: {len(items_data)} шт. за {(datetime.now()-start_time).total_seconds():.2f}с")
+        # Використовуємо глобальну сесію замість створення нової
+        async with http_session.get("https://raw.githubusercontent.com/ao-data/ao-bin-dumps/master/formatted/items.json", timeout=60) as r:
+            if r.status == 200:
+                data = await r.json(content_type=None)
+                allowed = ["weapon","armor","plate","leather","cloth","bag","cape","potion","meal","mount","tool","shapeshifter","offhand"]
+                items_data = {i["UniqueName"]: i for i in data if i.get("UniqueName","").startswith(("T4_","T5_","T6_","T7_","T8_")) and any(x in i.get("UniqueName","").lower() for x in allowed)}
+                logger.info(f"✅ БД завантажена: {len(items_data)} шт. за {(datetime.now()-start_time).total_seconds():.2f}с")
     except Exception: logger.exception("Помилка БД:")
     finally: is_db_ready = True
 
@@ -120,51 +120,52 @@ def fmt_t(s):
     except: return "???"
 
 async def scan_logic(d, f_c=None, t_c=None):
+    global http_session
     if not items_data: return [] 
     res = []; b_l = d.get("buy_limit", 0); p_l = d.get("profit_limit", 4000); ext = d.get("extra", False)
     i_list = list(items_data.keys()); cities = [f_c, t_c] if f_c and t_c else CITIES
     
-    async with aiohttp.ClientSession() as s:
-        for i in range(0, len(i_list), 50):
-            url = f"https://europe.albion-online-data.com/api/v2/stats/prices/{','.join(i_list[i:i+50])}?locations={','.join(cities)}"
-            data = None
+    for i in range(0, len(i_list), 50):
+        url = f"https://europe.albion-online-data.com/api/v2/stats/prices/{','.join(i_list[i:i+50])}?locations={','.join(cities)}"
+        data = None
+        
+        for attempt in range(3):
+            try:
+                # Використовуємо глобальну сесію для швидкості
+                async with http_session.get(url, timeout=20) as resp:
+                    if resp.status == 429: await asyncio.sleep(1); continue
+                    if resp.status != 200: logger.warning(f"API статус {resp.status}"); break
+                    data = await resp.json()
+                    break
+            except Exception: logger.exception("Мережева помилка API:"); await asyncio.sleep(1)
             
-            for attempt in range(3):
-                try:
-                    async with s.get(url, timeout=20, headers=HEADERS) as resp:
-                        if resp.status == 429: await asyncio.sleep(1); continue
-                        if resp.status != 200: logger.warning(f"API статус {resp.status}"); break
-                        data = await resp.json()
-                        break
-                except Exception: logger.exception("Мережева помилка API:"); await asyncio.sleep(1)
-                
-            if not data: continue
-            
-            now = datetime.now(UTC)
-            grouped = {}
-            for e in data:
-                k = f"{e['item_id']}|{e['quality']}"; grouped.setdefault(k, {})[e['city']] = e
-            for k, c_d in grouped.items():
-                i_id, q = k.split("|"); srcs = [f_c] if f_c else [c for c in c_d if c!="Black Market"]
-                for sc in srcs:
-                    if sc not in c_d: continue
-                    buy = c_d[sc].get('sell_price_min', 0)
-                    if buy <= 500 or buy > b_l: continue
-                    b_dt = datetime.fromisoformat(c_d[sc]['sell_price_min_date'].split(".")[0].replace("Z","")).replace(tzinfo=UTC)
-                    if (now-b_dt).total_seconds()/60 > 180: continue
-                    targets = [t_c] if t_c else [c for c in c_d if c!=sc]
-                    for tc in targets:
-                        if tc not in c_d: continue
-                        sk = 'buy_price_max_date' if tc=="Black Market" else 'sell_price_min_date'
-                        sell = c_d[tc].get('buy_price_max' if tc=="Black Market" else 'sell_price_min', 0)
-                        if sell <= buy or (sell/buy) > 10: continue
-                        s_dt = datetime.fromisoformat(c_d[tc].get(sk).split(".")[0].replace("Z","")).replace(tzinfo=UTC)
-                        if (now-s_dt).total_seconds()/60 > 180: continue
-                        p_n = int(sell*0.895-buy)
-                        if p_n >= p_l:
-                            if ext and ((now-b_dt).total_seconds()/60 > 30 or (now-s_dt).total_seconds()/60 > 30): continue
-                            res.append({'id':i_id,'q':int(q),'from':sc,'to':tc,'buy':buy,'sell':sell,'p_p':int(sell*0.935-buy),'p_n':p_n,'bd':c_d[sc]['sell_price_min_date'],'sd':c_d[tc].get(sk)})
-            if i % 300 == 0: await asyncio.sleep(0.2)
+        if not data: continue
+        
+        now = datetime.now(UTC)
+        grouped = {}
+        for e in data:
+            k = f"{e['item_id']}|{e['quality']}"; grouped.setdefault(k, {})[e['city']] = e
+        for k, c_d in grouped.items():
+            i_id, q = k.split("|"); srcs = [f_c] if f_c else [c for c in c_d if c!="Black Market"]
+            for sc in srcs:
+                if sc not in c_d: continue
+                buy = c_d[sc].get('sell_price_min', 0)
+                if buy <= 500 or buy > b_l: continue
+                b_dt = datetime.fromisoformat(c_d[sc]['sell_price_min_date'].split(".")[0].replace("Z","")).replace(tzinfo=UTC)
+                if (now-b_dt).total_seconds()/60 > 180: continue
+                targets = [t_c] if t_c else [c for c in c_d if c!=sc]
+                for tc in targets:
+                    if tc not in c_d: continue
+                    sk = 'buy_price_max_date' if tc=="Black Market" else 'sell_price_min_date'
+                    sell = c_d[tc].get('buy_price_max' if tc=="Black Market" else 'sell_price_min', 0)
+                    if sell <= buy or (sell/buy) > 10: continue
+                    s_dt = datetime.fromisoformat(c_d[tc].get(sk).split(".")[0].replace("Z","")).replace(tzinfo=UTC)
+                    if (now-s_dt).total_seconds()/60 > 180: continue
+                    p_n = int(sell*0.895-buy)
+                    if p_n >= p_l:
+                        if ext and ((now-b_dt).total_seconds()/60 > 30 or (now-s_dt).total_seconds()/60 > 30): continue
+                        res.append({'id':i_id,'q':int(q),'from':sc,'to':tc,'buy':buy,'sell':sell,'p_p':int(sell*0.935-buy),'p_n':p_n,'bd':c_d[sc]['sell_price_min_date'],'sd':c_d[tc].get(sk)})
+        if i % 300 == 0: await asyncio.sleep(0.2)
     return res
 # ================= ОБРОБНИКИ ПОДІЙ =================
 @dp.message(F.text == "🚀 Запустити сканер", StateFilter('*'))
@@ -192,6 +193,7 @@ async def main_search(m, state: FSMContext):
             if u_id in user_cooldowns and (now - user_cooldowns[u_id]).total_seconds() < 25:
                 return await m.answer(f"⏳ Зачекай {int(25-(now-user_cooldowns[u_id]).total_seconds())} сек.")
             active_scans.add(u_id)
+            logger.info(f"Активних сканів: {len(active_scans)}") # Додано лог активних сканів
             
         async with scan_semaphore:
             user_cooldowns[u_id] = now
@@ -219,7 +221,6 @@ async def cmd_help(m, state: FSMContext):
     d = await state.get_data()
     await m.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_main_kb(d))
 
-# ВИПРАВЛЕНО: Додано точний текст "🗺 Обрати режим"
 @dp.message(F.text.in_(["🌍 Охоплення: Всі міста", "📍 Маршрут: Шлях", "🗺 Обрати режим"]), StateFilter('*'))
 async def toggle_mode_menu(m, state: FSMContext):
     d = await state.get_data()
@@ -267,6 +268,7 @@ async def calc_start(m, state: FSMContext):
 @dp.message(StateFilter(BotState.calc_count, BotState.calc_buy, BotState.calc_sell))
 async def h_calc(m, state: FSMContext):
     if m.text == "❌ Скасувати": return
+    await bot.send_chat_action(chat_id=m.chat.id, action=ChatAction.TYPING) # Індикатор "друкує"
     t0 = time.monotonic() 
     try:
         v = int(m.text.replace(" ", "").replace(",", ""))
@@ -302,6 +304,7 @@ async def cancel_limit(m, state: FSMContext):
 
 @dp.message(StateFilter(BotState.waiting_for_buy_limit, BotState.waiting_for_profit_limit))
 async def h_limits(m, state: FSMContext):
+    await bot.send_chat_action(chat_id=m.chat.id, action=ChatAction.TYPING) # Індикатор "друкує"
     try:
         v = int(m.text.replace(" ","").replace(",",""))
         if v <= 0: 
@@ -403,16 +406,26 @@ async def cancel_res(cb): await cb.answer(); await safe_delete(cb.message)
 async def cmd_start(m, state: FSMContext): await state.clear(); await m.answer("👋 Бот готовий!", reply_markup=get_start_kb())
 
 async def main():
+    global http_session
+    
     if not os.environ.get("BOT_TOKEN"):
         logger.error("🚨 BOT_TOKEN не встановлено! Бот не може бути запущений.")
         return
         
     if ADMIN_ID == 0: logger.warning("⚠️ ADMIN_ID не встановлена! Функції адміна будуть недоступні.")
         
-    await set_bot_commands() 
+    await set_bot_commands()
+    
+    # Ініціалізація глобальної сесії для всіх HTTP-запитів
+    http_session = aiohttp.ClientSession(headers=HEADERS)
+    
     await bot.delete_webhook(drop_pending_updates=True)
     asyncio.create_task(download_items())
     asyncio.create_task(cleanup_cooldowns())
-    await dp.start_polling(bot)
+    
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await http_session.close() # Закриваємо сесію коректно при вимкненні бота
 
 if __name__ == "__main__": asyncio.run(main())
