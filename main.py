@@ -264,6 +264,13 @@ async def set_limit_cb(cb, state: FSMContext):
         await safe_delete(cb.message)
     except Exception: logger.exception("Помилка в set_limit_cb:")
 
+# УНІВЕРСАЛЬНИЙ СКАСУВАЛЬНИК: Стоїть вище калькулятора, щоб гарантовано спрацювати
+@dp.message(F.text == "❌ Скасувати", StateFilter('*'))
+async def cancel_limit(m, state: FSMContext):
+    d = await state.get_data()
+    await state.set_state(None)
+    await m.answer("🚫 Дію скасовано. Повернення до меню.", reply_markup=get_main_kb(d))
+
 @dp.message(F.text == "🧮 Калькулятор", StateFilter('*'))
 async def calc_start(m, state: FSMContext):
     await state.set_state(BotState.calc_count)
@@ -272,7 +279,6 @@ async def calc_start(m, state: FSMContext):
 
 @dp.message(StateFilter(BotState.calc_count, BotState.calc_buy, BotState.calc_sell))
 async def h_calc(m, state: FSMContext):
-    if m.text == "❌ Скасувати": return
     await bot.send_chat_action(chat_id=m.chat.id, action=ChatAction.TYPING) 
     t0 = time.monotonic() 
     try:
@@ -301,12 +307,6 @@ async def h_calc(m, state: FSMContext):
         await m.answer("❌ Будь ласка, введи тільки число! Запусти калькулятор наново.")
     finally:
         logger.info(f"Обробка калькулятора (h_calc) зайняла {time.monotonic()-t0:.3f}с для {m.from_user.id}")
-
-@dp.message(F.text == "❌ Скасувати", StateFilter('*'))
-async def cancel_limit(m, state: FSMContext):
-    d = await state.get_data()
-    await state.set_state(None)
-    await m.answer("🚫 Дію скасовано. Повернення до меню.", reply_markup=get_main_kb(d))
 
 @dp.message(StateFilter(BotState.waiting_for_buy_limit, BotState.waiting_for_profit_limit))
 async def h_limits(m, state: FSMContext):
