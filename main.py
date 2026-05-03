@@ -231,6 +231,12 @@ async def toggle_liq(m, state: FSMContext):
     d = await state.get_data(); val = not d.get("check_liq", False); await state.update_data(check_liq=val)
     await m.answer(f"📊 Аналіз попиту: {'УВІМКНЕНО' if val else 'ВИМКНЕНО'}", reply_markup=get_main_kb(await state.get_data()))
 
+@dp.message(F.text.contains("Допомога"), StateFilter('*'))
+@dp.message(Command("help"), StateFilter('*'))
+async def cmd_help(m, state: FSMContext):
+    help_text = "📖 <b>Допомога:</b>\n1. Налаштуй Бюджет.\n2. Обери Режим.\n3. Тисни Сканер.\n⚡ 30хв — свіжість цін.\n📊 Попит — активність на ринку."
+    await m.answer(help_text, parse_mode=ParseMode.HTML)
+
 @dp.message(F.text == "🗺 Режим", StateFilter('*'))
 async def choose_mode(m, state):
     await m.answer("Оберіть режим:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎲 Всі міста", callback_data="set_mode_all")], [InlineKeyboardButton(text="📍 Шлях", callback_data="set_mode_custom")]]))
@@ -244,10 +250,10 @@ async def set_mode_cb(cb, state: FSMContext):
 @dp.callback_query(F.data.startswith("city_"))
 async def city_pick(cb, state: FSMContext):
     await cb.answer(); curr = await state.get_state(); c = cb.data.split("_")[1]
-    if "picking_from" in str(curr):
+    if curr and "picking_from" in str(curr):
         await state.update_data(f_c=c); await state.set_state(BotState.picking_to)
         await cb.message.edit_text(f"З: {c}. Куди:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{CITY_EMOJIS[ci]} {ci}", callback_data=f"city_{ci}")] for ci in CITIES if ci!=c and ci!="Black Market"]))
-    elif "picking_to" in str(curr):
+    elif curr and "picking_to" in str(curr):
         await state.update_data(t_c=c, mode="custom"); await state.set_state(None)
         await cb.message.answer("✅ Готово!", reply_markup=get_main_kb(await state.get_data()))
 
@@ -273,16 +279,16 @@ async def cancel_handler(m, state: FSMContext):
 
 @dp.message(StateFilter(BotState.waiting_for_buy_limit, BotState.waiting_for_profit_limit, BotState.calc_count, BotState.calc_buy, BotState.calc_sell))
 async def numeric_handler(m, state: FSMContext):
-    if m.text.startswith('/'): 
+    if m.text and m.text.startswith('/'): 
         await state.set_state(None)
         return
     try:
         v = int(m.text.replace(" ","")); curr = await state.get_state()
-        if "waiting_for_buy_limit" in str(curr): await state.update_data(buy_limit=v); await state.set_state(None); await m.answer(f"✅ Бюджет: {v:,}", reply_markup=get_main_kb(await state.get_data()))
-        elif "waiting_for_profit_limit" in str(curr): await state.update_data(profit_limit=v); await state.set_state(None); await m.answer(f"✅ Профіт: {v:,}", reply_markup=get_main_kb(await state.get_data()))
-        elif "calc_count" in str(curr): await state.update_data(c=v); await state.set_state(BotState.calc_buy); await m.answer("📥 Введи ціну КУПІВЛІ:")
-        elif "calc_buy" in str(curr): await state.update_data(b=v); await state.set_state(BotState.calc_sell); await m.answer("📤 Введи ціну ПРОДАЖУ:")
-        elif "calc_sell" in str(curr):
+        if curr and "waiting_for_buy_limit" in str(curr): await state.update_data(buy_limit=v); await state.set_state(None); await m.answer(f"✅ Бюджет: {v:,}", reply_markup=get_main_kb(await state.get_data()))
+        elif curr and "waiting_for_profit_limit" in str(curr): await state.update_data(profit_limit=v); await state.set_state(None); await m.answer(f"✅ Профіт: {v:,}", reply_markup=get_main_kb(await state.get_data()))
+        elif curr and "calc_count" in str(curr): await state.update_data(c=v); await state.set_state(BotState.calc_buy); await m.answer("📥 Введи ціну КУПІВЛІ:")
+        elif curr and "calc_buy" in str(curr): await state.update_data(b=v); await state.set_state(BotState.calc_sell); await m.answer("📤 Введи ціну ПРОДАЖУ:")
+        elif curr and "calc_sell" in str(curr):
             d = await state.get_data(); await state.set_state(None)
             p_p, p_n = int((v*0.935)-d['b'])*d['c'], int((v*0.895)-d['b'])*d['c']
             await m.answer(f"📊 Результат ({d['c']} шт):\n👑 Пр: <b>{p_p:,}</b>\n💀 Пр: <b>{p_n:,}</b>", reply_markup=get_main_kb(d), parse_mode=ParseMode.HTML)
@@ -290,10 +296,6 @@ async def numeric_handler(m, state: FSMContext):
 
 @dp.message(F.text == "🔄 Скинути", StateFilter('*'))
 async def btn_res(m, state: FSMContext): await state.clear(); await m.answer("🔄 Скинуто!", reply_markup=get_main_kb({}))
-
-@dp.message(Command("help"), StateFilter('*'))
-async def cmd_help(m, state: FSMContext):
-    await m.answer("📖 <b>Допомога:</b>\n1. Налаштуй Бюджет.\n2. Обери Режим.\n3. Тисни Сканер.\n⚡ 30хв — свіжість цін.\n📊 Попит — активність на ринку.", parse_mode=ParseMode.HTML)
 
 @dp.message(Command("start"), StateFilter('*'))
 async def cmd_start(m, state: FSMContext):
@@ -329,4 +331,3 @@ async def main():
 if __name__ == "__main__":
     try: asyncio.run(main())
     except: pass
-
