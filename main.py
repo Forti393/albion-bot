@@ -176,12 +176,11 @@ async def disp_res(msg, res, d):
         b_id = r['id'].split("@")[0]; icon = get_item_icon(b_id)
         enc = r['id'].split("@")[1] if "@" in r['id'] else "0"; tier = b_id.split('_')[0][1:]
         name = items_data.get(b_id, {}).get("LocalizedNames", {}).get("RU-RU", b_id)
-        name = re.sub(r'\s*\([^)]*\)', '', name)
+        name = re.sub(r'\s*\([^)]*\)', '', name); name = html.escape(name.upper())
         for t in TRASH: name = name.replace(t, "")
-        name = html.escape(name.upper())
-
+        
         tbd, tsd = fmt_t(r.get('bd')), fmt_t(r.get('sd'))
-        liq_line = f" (📦{r.get('vol', '?')})" if show_liq else ""
+        liq_line = f"             📦 {r.get('vol','?')} шт/д\n" if show_liq else ""
 
         item_block = (
             f"{idx}) {icon} <b>{name}</b> [{tier}.{enc}]\n"
@@ -190,7 +189,8 @@ async def disp_res(msg, res, d):
             f"📤 {CITY_EMOJIS[r['to']]} {r['sell']:,}\n"
             f"<pre>"
             f"             👑 {r['p_p']:,}   |   {tbd}\n"
-            f"💵 Пр:{liq_line}\n"
+            f"💵 Пр:\n"
+            f"{liq_line}"
             f"             💀 {r['p_n']:,}   |   {tsd}\n"
             f"</pre>\n\n"
         )
@@ -204,8 +204,8 @@ def get_main_kb(d):
     m = d.get("mode")
     if not m: return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❓ Допомога"), KeyboardButton(text="💰 Налаштувати бюджет")], [KeyboardButton(text="🗺 Обрати режим")]], resize_keyboard=True)
     m_l = "🌍 Всі міста" if m == "all" else "📍 Шлях"
-    e_l = "⚡ Свіжі ціни: ON" if d.get("extra") else "⚡ Свіжі ціни: OFF"
-    liq_l = "📊 Попит: ON" if d.get("check_liq") else "📊 Попит: OFF"
+    e_l = f"⚡ 30хв: {'ON' if d.get('extra') else 'OFF'}"
+    liq_l = f"📊 Попит: {'ON' if d.get('check_liq') else 'OFF'}"
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🚀 Запустити сканер")], [KeyboardButton(text=m_l), KeyboardButton(text=e_l)], [KeyboardButton(text=liq_l), KeyboardButton(text="🧮 Калькулятор")], [KeyboardButton(text="💰 Налаштувати бюджет"), KeyboardButton(text="🔄 Перезавантаження")]], resize_keyboard=True)
 
 # --- ОБРОБНИКИ ---
@@ -222,12 +222,12 @@ async def main_search(m, state: FSMContext):
     if not res: await m.answer("📭 Порожньо")
     else: await disp_res(m, res, d); await m.answer(f"✅ Знайдено: {len(res)}", reply_markup=get_main_kb(d))
 
-@dp.message(F.text.in_(["⚡ Свіжі ціни: ON", "⚡ Свіжі ціни: OFF"]), StateFilter('*'))
+@dp.message(F.text.regexp(r"⚡ 30хв:"), StateFilter('*'))
 async def toggle_extra(m, state: FSMContext):
     d = await state.get_data(); val = not d.get("extra", False); await state.update_data(extra=val)
     await m.answer(f"⚡ Фільтр 30хв: {'УВІМКНЕНО' if val else 'ВИМКНЕНО'}", reply_markup=get_main_kb(await state.get_data()))
 
-@dp.message(F.text.in_(["📊 Попит: ON", "📊 Попит: OFF"]), StateFilter('*'))
+@dp.message(F.text.regexp(r"📊 Попит:"), StateFilter('*'))
 async def toggle_liq(m, state: FSMContext):
     d = await state.get_data(); val = not d.get("check_liq", False); await state.update_data(check_liq=val)
     await m.answer(f"📊 Аналіз попиту: {'УВІМКНЕНО' if val else 'ВИМКНЕНО'}", reply_markup=get_main_kb(await state.get_data()))
@@ -239,16 +239,24 @@ async def choose_mode(m, state):
 @dp.callback_query(F.data.startswith("set_mode_"))
 async def set_mode_cb(cb, state: FSMContext):
     m = cb.data.split("_")[2]; await state.update_data(mode=m); await cb.answer()
+    logger.info(f"Режим змінено на: {m}")
     if m == "all": await cb.message.answer("🌍 Всі міста!", reply_markup=get_main_kb(await state.get_data()))
     else: await state.set_state(BotState.picking_from); await cb.message.answer("Звідки:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{CITY_EMOJIS[c]} {c}", callback_data=f"city_{c}")] for c in CITIES if c!="Black Market"]))
 
-@dp.callback_query(StateFilter(BotState.picking_from, BotState.picking_to), F.data.startswith("city_"))
+# ВИПРАВЛЕНО: Більш надійний обробник вибору міста
+@dp.callback_query(F.data.startswith("city_"))
 async def city_pick(cb, state: FSMContext):
-    c = cb.data.split("_")[1]; curr = await state.get_state(); await cb.answer()
-    if "from" in str(curr):
+    await cb.answer()
+    curr = await state.get_state()
+    if not curr: return
+    
+    c = cb.data.split("_")[1]
+    if "picking_from" in str(curr):
         await state.update_data(f_c=c); await state.set_state(BotState.picking_to)
         await cb.message.edit_text(f"З: {c}. Куди:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{CITY_EMOJIS[ci]} {ci}", callback_data=f"city_{ci}")] for ci in CITIES if ci!=c and ci!="Black Market"]))
-    else: await state.update_data(t_c=c, mode="custom"); await state.set_state(None); await cb.message.answer("✅ Готово!", reply_markup=get_main_kb(await state.get_data()))
+    elif "picking_to" in str(curr):
+        await state.update_data(t_c=c, mode="custom"); await state.set_state(None)
+        await cb.message.answer("✅ Готово!", reply_markup=get_main_kb(await state.get_data()))
 
 @dp.message(F.text == "💰 Налаштувати бюджет", StateFilter('*'))
 async def limit_menu(m, state: FSMContext):
@@ -264,7 +272,6 @@ async def set_limit_cb(cb, state: FSMContext):
 async def h_limits(m, state: FSMContext):
     try:
         v = int(m.text.replace(" ","")); curr = await state.get_state()
-        if v <= 0: return await m.answer("❌ > 0")
         if "buy" in str(curr): await state.update_data(buy_limit=v)
         else: await state.update_data(profit_limit=v)
         await state.set_state(None); await m.answer(f"✅ {v:,}", reply_markup=get_main_kb(await state.get_data()))
