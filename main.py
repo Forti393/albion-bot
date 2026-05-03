@@ -95,7 +95,7 @@ async def download_items():
                 data = await r.json(content_type=None)
                 allowed = ["weapon","armor","plate","leather","cloth","bag","cape","potion","meal","mount","tool","offhand"]
                 items_data = {i["UniqueName"]: i for i in data if i.get("UniqueName","").startswith(("T4_","T5_","T6_","T7_","T8_")) and any(x in i.get("UniqueName","").lower() for x in allowed)}
-                logger.info(f"✅ БД завантажена.")
+                logger.info(f"✅ БД завантажена: {len(items_data)} предметів.")
                 is_db_ready = True
     except: is_db_ready = True
 
@@ -144,6 +144,7 @@ async def scan_logic(d, f_c=None, t_c=None):
                         if ext and ((now-b_dt).total_seconds()/60 > 30 or (now-s_dt).total_seconds()/60 > 30): continue
                         pre_res.append({'id':i_id,'q':int(q),'from':sc,'to':tc,'buy':buy,'sell':sell,
                                         'p_p':int(sell*0.935-buy),'p_n':p_n,'bd':bd_str,'sd':sd_str})
+
     if check_liq and pre_res:
         pre_res.sort(key=lambda x: x['p_n'], reverse=True)
         res = []
@@ -159,7 +160,6 @@ async def disp_res(msg, res, d):
     res.sort(key=lambda x: x['p_n'], reverse=True)
     show_liq = d.get("check_liq")
     messages, full_text = [], ""
-    
     for idx, r in enumerate(res[:15], 1):
         b_id = r['id'].split("@")[0]; icon = get_item_icon(b_id)
         enc = r['id'].split("@")[1] if "@" in r['id'] else "0"; tier = b_id.split('_')[0][1:]
@@ -169,36 +169,31 @@ async def disp_res(msg, res, d):
         
         tbd, tsd = fmt_t(r.get('bd')), fmt_t(r.get('sd'))
         
-        # Форматування блоку Прибуток + Попит
+        # Розрахунок прибутку та форматування блоку
         p_p_str = f"{r['p_p']:,}"
         p_n_str = f"{r['p_n']:,}"
         
+        liq_info = ""
         if show_liq:
-            vol_str = f"{r.get('vol', 0)} шт/д"
-            # Створюємо таблицю: ліва частина (14 символів) + права частина
-            row1 = f"👑 {p_p_str:<12} 📊 Попит"
-            row2 = f"💀 {p_n_str:<12} {vol_str}"
-        else:
-            row1 = f"👑 Прибуток: {p_p_str}"
-            row2 = f"💀 Прибуток: {p_n_str}"
+            vol = r.get('vol', 0)
+            # Формуємо рядок попиту, який буде притиснутий до правого краю в <pre>
+            # Використовуємо пробіли для вирівнювання (приблизно 20 символів ширина)
+            liq_info = f"   (Попит: {vol} шт/д)"
 
         item_block = (
             f"{idx}) {icon} <b>{name}</b> [{tier}.{enc}]\n"
             f"✨ {QUALITY_NAMES.get(r['q'], 'Обычное')}\n"
-            f"📥 {CITY_EMOJIS[r['from']]} {r['buy']:,}  |  🕒 {tbd}\n"
-            f"📤 {CITY_EMOJIS[r['to']]} {r['sell']:,}  |  🕒 {tsd}\n"
+            f"📥 {CITY_EMOJIS[r['from']]} {r['buy']:,} | 🕒 {tbd}\n"
+            f"📤 {CITY_EMOJIS[r['to']]} {r['sell']:,} | 🕒 {tsd}\n"
+            f"<b>Прибуток:</b>\n"
             f"<pre>"
-            f"{row1}\n"
-            f"{row2}"
+            f"👑 {p_p_str:<12}{liq_info}\n"
+            f"💀 {p_n_str:<12}"
             f"</pre>\n"
-            f"───────────────────\n\n" # Розділювач
+            f"───────────────────\n\n"
         )
-        
-        if len(full_text) + len(item_block) > 3900: 
-            messages.append(full_text); full_text = item_block
-        else: 
-            full_text += item_block
-            
+        if len(full_text) + len(item_block) > 3900: messages.append(full_text); full_text = item_block
+        else: full_text += item_block
     if full_text: messages.append(full_text)
     for t in messages: await msg.answer(t, parse_mode=ParseMode.HTML)
 
@@ -235,10 +230,13 @@ async def toggle_liq(m, state: FSMContext):
 @dp.message(F.text.contains("Допомога"), StateFilter('*'))
 @dp.message(Command("help"), StateFilter('*'))
 async def cmd_help(m, state: FSMContext):
+    await state.set_state(None)
     await m.answer("📖 <b>Допомога:</b>\n1. Налаштуй Бюджет.\n2. Обери Режим.\n3. Тисни Сканер.", parse_mode=ParseMode.HTML)
 
 @dp.message(F.text == "🗺 Режим", StateFilter('*'))
-async def choose_mode(m, state):
+async def choose_mode(m, state: FSMContext):
+    # Скидаємо стан перед вибором режиму, щоб кнопка завжди спрацьовувала
+    await state.set_state(None)
     await m.answer("Оберіть режим:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎲 Всі міста", callback_data="set_mode_all")], [InlineKeyboardButton(text="📍 Шлях", callback_data="set_mode_custom")]]))
 
 @dp.callback_query(F.data.startswith("set_mode_"))
@@ -265,12 +263,12 @@ async def limit_menu(m, state: FSMContext):
 @dp.callback_query(F.data.startswith("set_limit_"))
 async def set_limit_cb(cb, state: FSMContext):
     t = cb.data.split("_")[2]; await state.set_state(BotState.waiting_for_buy_limit if t=="buy" else BotState.waiting_for_profit_limit); await cb.answer()
-    await cb.message.answer(f"Введи {'бюджет' if t=='buy' else 'мін. профіт'}:")
+    await cb.message.answer(f"Введи {'бюджет' if t=='buy' else 'мін. профіт'}:", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❌ Скасувати")]], resize_keyboard=True))
 
 @dp.message(F.text == "🧮 Калькулятор", StateFilter('*'))
 async def calc_start(m, state: FSMContext):
     await state.set_state(BotState.calc_count)
-    await m.answer("📦 Кількість предметів:", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❌ Скасувати")]], resize_keyboard=True))
+    await m.answer("📦 Введи кількість предметів:", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❌ Скасувати")]], resize_keyboard=True))
 
 @dp.message(F.text == "❌ Скасувати", StateFilter('*'))
 async def cancel_handler(m, state: FSMContext):
@@ -283,8 +281,8 @@ async def numeric_handler(m, state: FSMContext):
         v = int(m.text.replace(" ","")); curr = await state.get_state()
         if "waiting_for_buy_limit" in str(curr): await state.update_data(buy_limit=v); await state.set_state(None); await m.answer(f"✅ Бюджет: {v:,}", reply_markup=get_main_kb(await state.get_data()))
         elif "waiting_for_profit_limit" in str(curr): await state.update_data(profit_limit=v); await state.set_state(None); await m.answer(f"✅ Профіт: {v:,}", reply_markup=get_main_kb(await state.get_data()))
-        elif "calc_count" in str(curr): await state.update_data(c=v); await state.set_state(BotState.calc_buy); await m.answer("📥 Ціна КУПІВЛІ:")
-        elif "calc_buy" in str(curr): await state.update_data(b=v); await state.set_state(BotState.calc_sell); await m.answer("📤 Ціна ПРОДАЖУ:")
+        elif "calc_count" in str(curr): await state.update_data(c=v); await state.set_state(BotState.calc_buy); await m.answer("📥 Введи ціну КУПІВЛІ:")
+        elif "calc_buy" in str(curr): await state.update_data(b=v); await state.set_state(BotState.calc_sell); await m.answer("📤 Введи ціну ПРОДАЖУ:")
         elif "calc_sell" in str(curr):
             d = await state.get_data(); await state.set_state(None)
             p_p, p_n = int((v*0.935)-d['b'])*d['c'], int((v*0.895)-d['b'])*d['c']
