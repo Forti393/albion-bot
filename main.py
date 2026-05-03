@@ -73,10 +73,11 @@ def fmt_t(s):
 
 async def get_item_liquidity(item_id, city):
     global http_session
-    if not http_session or http_session.closed or is_shutting_down: return 0
+    if not http_session or http_session.closed or is_shutting_down: return {"vol": 0, "avg": 0}
     cache_key, now = f"{item_id}|{city}", datetime.now(timezone.utc)
     if cache_key in history_cache and (now - history_cache[cache_key]['time']).total_seconds() < CACHE_TTL:
-        return history_cache[cache_key]['volume']
+        return history_cache[cache_key]['data']
+    
     url = f"https://europe.albion-online-data.com/api/v2/stats/history/{item_id}?locations={city}&time-series=1"
     async with scan_semaphore:
         try:
@@ -84,11 +85,12 @@ async def get_item_liquidity(item_id, city):
                 if resp.status == 200:
                     data = await resp.json()
                     if data and data[0].get('data'):
-                        vol = data[0]['data'][-1].get('item_count', 0)
-                        history_cache[cache_key] = {'volume': vol, 'time': now}
-                        return vol
+                        last_entry = data[0]['data'][-1]
+                        res = {"vol": last_entry.get('item_count', 0), "avg": int(last_entry.get('avg_price', 0))}
+                        history_cache[cache_key] = {'data': res, 'time': now}
+                        return res
         except: pass
-    return 0
+    return {"vol": 0, "avg": 0}
 
 async def download_items():
     global items_data, is_db_ready, http_session
@@ -155,8 +157,11 @@ async def scan_logic(d, f_c=None, t_c=None):
         pre_res.sort(key=lambda x: x['p_n'], reverse=True)
         res = []
         for item in pre_res[:15]:
-            vol = await get_item_liquidity(item['id'].split("@")[0], item['to'])
-            if vol > 0: item['vol'] = vol; res.append(item)
+            liq_data = await get_item_liquidity(item['id'].split("@")[0], item['to'])
+            if liq_data["vol"] > 0: 
+                item['vol'] = liq_data["vol"]
+                item['avg_24'] = liq_data["avg"]
+                res.append(item)
         return res
     return pre_res
 
@@ -170,8 +175,14 @@ async def disp_res(msg, res, d):
         name = items_data.get(b_id, {}).get("LocalizedNames", {}).get("RU-RU", b_id)
         name = re.sub(r'\s*\([^)]*\)', '', name); name = html.escape(name.upper())
         for t in TRASH: name = name.replace(t, "")
+        
         tbd, tsd = fmt_t(r.get('bd')), fmt_t(r.get('sd'))
-        liq_line = f"          📦 <b>{r.get('vol','?')} шт/д</b>\n" if show_liq else ""
+        
+        liq_part = ""
+        if show_liq:
+            liq_part = (f"          📦 {r.get('vol','?')} шт/д\n"
+                        f"          📊 {r.get('avg_24', 0):,} ср.24г\n")
+
         item_block = (
             f"{idx}) {icon} <b>{name}</b> [{tier}.{enc}]\n"
             f"✨ {QUALITY_NAMES.get(r['q'], 'Обычное')}\n"
@@ -180,7 +191,7 @@ async def disp_res(msg, res, d):
             f"<pre>"
             f"          👑 <b>{r['p_p']:,}</b>   |   {tbd}\n"
             f"💵 Пр:\n"
-            f"{liq_line}"
+            f"{liq_part}"
             f"          💀 <b>{r['p_n']:,}</b>   |   {tsd}"
             f"</pre>\n\n"
         )
@@ -223,7 +234,7 @@ async def toggle_liq(m, state: FSMContext):
 @dp.message(Command("help"), StateFilter('*'))
 async def cmd_help(m, state: FSMContext):
     await state.set_state(None)
-    await m.answer("📖 <b>Допомога:</b>\n1. Налаштуй Бюджет.\n2. Обери Режим.\n3. Тисни Сканер.\n⚡ 30хв — свіжість цін.\n📊 Попит — активність на ринку.", parse_mode=ParseMode.HTML)
+    await m.answer("📖 <b>Допомога:</b>\n1. Налаштуй Бюджет.\n2. Обери Режим.\n3. Тисни Сканер.\n⚡ 30хв — свіжість цін.\n📊 Попит — активність ринку та сер. ціна.", parse_mode=ParseMode.HTML)
 
 @dp.message(F.text == "🗺 Режим", StateFilter('*'))
 async def choose_mode(m, state):
@@ -288,16 +299,8 @@ async def btn_res(m, state: FSMContext): await state.clear(); await m.answer("�
 
 @dp.message(Command("start"), StateFilter('*'))
 async def cmd_start(m, state: FSMContext):
-    await state.set_state(None)
-    await state.clear()
-    welcome_text = (
-        "🚀 <b>Albion Trader Bot</b> — твій сканер!\n\n"
-        "🔍 Пошук різниці цін.\n"
-        "💰 Чистий прибуток з податками.\n"
-        "⚡ Фільтр свіжих цін.\n\n"
-        "Налаштуй бюджет і почни заробляти!"
-    )
-    await m.answer(welcome_text, reply_markup=get_main_kb({}), parse_mode=ParseMode.HTML)
+    await state.set_state(None); await state.clear()
+    await m.answer("🚀 <b>Albion Trader Bot</b> — твій сканер!", reply_markup=get_main_kb({}), parse_mode=ParseMode.HTML)
 
 async def shutdown():
     global is_shutting_down, http_session
