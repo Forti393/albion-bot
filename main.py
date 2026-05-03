@@ -160,6 +160,7 @@ async def disp_res(msg, res, d):
     res.sort(key=lambda x: x['p_n'], reverse=True)
     show_liq = d.get("check_liq")
     messages, full_text = [], ""
+    
     for idx, r in enumerate(res[:15], 1):
         b_id = r['id'].split("@")[0]; icon = get_item_icon(b_id)
         enc = r['id'].split("@")[1] if "@" in r['id'] else "0"; tier = b_id.split('_')[0][1:]
@@ -169,32 +170,25 @@ async def disp_res(msg, res, d):
         
         tbd, tsd = fmt_t(r.get('bd')), fmt_t(r.get('sd'))
         
-        # Форматування блоку прибутку та попиту
-        p_p_f, p_n_f = f"{r['p_p']:,}", f"{r['p_n']:,}"
-        if show_liq:
-            vol_f = f"{r.get('vol', 0)} шт/д"
-            # Створюємо таблицю: ліва частина (прибуток), права частина (попит)
-            # <pre> підтримує фіксовану ширину символів
-            profit_block = (
-                f"<pre>"
-                f"👑 {p_p_f:<11} │ 📊 Попит:\n"
-                f"💀 {p_n_f:<11} │ {vol_f}"
-                f"</pre>"
-            )
-        else:
-            profit_block = (
-                f"<pre>"
-                f"👑 Пр: {p_p_f}\n"
-                f"💀 Пр: {p_n_f}"
-                f"</pre>"
-            )
+        # Логіка ювелірного вирівнювання через <pre>
+        profit_header = "Прибуток:".ljust(18)
+        demand_header = "Попит:" if show_liq else ""
+        
+        line_crown = f"👑 {r['p_p']:,}".ljust(18)
+        line_demand = f"{r.get('vol', 0)} шт/д" if show_liq else ""
+        
+        line_skull = f"💀 {r['p_n']:,}".ljust(18)
 
         item_block = (
             f"{idx}) {icon} <b>{name}</b> [{tier}.{enc}]\n"
             f"✨ {QUALITY_NAMES.get(r['q'], 'Обычное')}\n"
             f"📥 {CITY_EMOJIS[r['from']]} {r['buy']:,} | 🕒 {tbd}\n"
             f"📤 {CITY_EMOJIS[r['to']]} {r['sell']:,} | 🕒 {tsd}\n"
-            f"{profit_block}\n"
+            f"<pre>"
+            f"{profit_header}{demand_header}\n"
+            f"{line_crown}{line_demand}\n"
+            f"{line_skull}"
+            f"</pre>\n\n" # Подвійний відступ між предметами
         )
         
         if len(full_text) + len(item_block) > 3900: 
@@ -215,7 +209,7 @@ def get_main_kb(d):
 
 @dp.message(F.text == "🚀 Запустити сканер", StateFilter('*'))
 async def main_search(m, state: FSMContext):
-    u_id = m.from_user.id; d = await state.get_data()
+    d = await state.get_data()
     if not is_db_ready: return await m.answer("⏳ БД вантажиться...")
     if d.get("buy_limit", 0) <= 0: return await m.answer("⚠️ Встанови бюджет!")
     if not d.get("mode"): return await m.answer("🗺️ Обери режим!")
