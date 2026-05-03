@@ -101,7 +101,6 @@ async def download_items():
     global items_data, is_db_ready, http_session
     start_time = datetime.now()
     try:
-        # Використовуємо глобальну сесію замість створення нової
         async with http_session.get("https://raw.githubusercontent.com/ao-data/ao-bin-dumps/master/formatted/items.json", timeout=60) as r:
             if r.status == 200:
                 data = await r.json(content_type=None)
@@ -131,7 +130,6 @@ async def scan_logic(d, f_c=None, t_c=None):
         
         for attempt in range(3):
             try:
-                # Використовуємо глобальну сесію для швидкості
                 async with http_session.get(url, timeout=20) as resp:
                     if resp.status == 429: await asyncio.sleep(1); continue
                     if resp.status != 200: logger.warning(f"API статус {resp.status}"); break
@@ -175,8 +173,15 @@ async def main_search(m, state: FSMContext):
     d = await state.get_data()
     
     if not is_db_ready or not items_data: return await m.answer("⏳ База ще вантажиться, зачекай пару секунд...")
+    
     b = d.get("buy_limit", 0)
-    if b <= 0: return await m.answer("💰 Встанови бюджет у меню!")
+    if b <= 0: 
+        req_kb = ReplyKeyboardMarkup(keyboard=[
+            [KeyboardButton(text="💰 Налаштувати бюджет")],
+            [KeyboardButton(text="❌ Скасувати")]
+        ], resize_keyboard=True)
+        return await m.answer("⚠️ Спочатку потрібно встановити бюджет для сканування!", reply_markup=req_kb)
+        
     mode = d.get("mode")
     if not mode: return await m.answer("🗺️ Обери режим!", reply_markup=get_mode_inline())
 
@@ -193,7 +198,7 @@ async def main_search(m, state: FSMContext):
             if u_id in user_cooldowns and (now - user_cooldowns[u_id]).total_seconds() < 25:
                 return await m.answer(f"⏳ Зачекай {int(25-(now-user_cooldowns[u_id]).total_seconds())} сек.")
             active_scans.add(u_id)
-            logger.info(f"Активних сканів: {len(active_scans)}") # Додано лог активних сканів
+            logger.info(f"Активних сканів: {len(active_scans)}")
             
         async with scan_semaphore:
             user_cooldowns[u_id] = now
@@ -268,7 +273,7 @@ async def calc_start(m, state: FSMContext):
 @dp.message(StateFilter(BotState.calc_count, BotState.calc_buy, BotState.calc_sell))
 async def h_calc(m, state: FSMContext):
     if m.text == "❌ Скасувати": return
-    await bot.send_chat_action(chat_id=m.chat.id, action=ChatAction.TYPING) # Індикатор "друкує"
+    await bot.send_chat_action(chat_id=m.chat.id, action=ChatAction.TYPING) 
     t0 = time.monotonic() 
     try:
         v = int(m.text.replace(" ", "").replace(",", ""))
@@ -297,14 +302,15 @@ async def h_calc(m, state: FSMContext):
     finally:
         logger.info(f"Обробка калькулятора (h_calc) зайняла {time.monotonic()-t0:.3f}с для {m.from_user.id}")
 
-@dp.message(F.text == "❌ Скасувати", StateFilter(BotState.waiting_for_buy_limit, BotState.waiting_for_profit_limit, BotState.calc_count, BotState.calc_buy, BotState.calc_sell))
+@dp.message(F.text == "❌ Скасувати", StateFilter('*'))
 async def cancel_limit(m, state: FSMContext):
-    d = await state.get_data(); await state.set_state(None)
-    await m.answer("🚫 Дію скасовано.", reply_markup=get_main_kb(d))
+    d = await state.get_data()
+    await state.set_state(None)
+    await m.answer("🚫 Дію скасовано. Повернення до меню.", reply_markup=get_main_kb(d))
 
 @dp.message(StateFilter(BotState.waiting_for_buy_limit, BotState.waiting_for_profit_limit))
 async def h_limits(m, state: FSMContext):
-    await bot.send_chat_action(chat_id=m.chat.id, action=ChatAction.TYPING) # Індикатор "друкує"
+    await bot.send_chat_action(chat_id=m.chat.id, action=ChatAction.TYPING)
     try:
         v = int(m.text.replace(" ","").replace(",",""))
         if v <= 0: 
@@ -315,7 +321,8 @@ async def h_limits(m, state: FSMContext):
         if "buy" in str(curr): await state.update_data(buy_limit=v)
         else: await state.update_data(profit_limit=v)
         
-        d = await state.get_data(); await state.set_state(None)
+        d = await state.get_data()
+        await state.set_state(None)
         await m.answer(f"✅ Збережено: {v:,}", reply_markup=get_main_kb(d))
     except: 
         await state.set_state(None)
@@ -416,7 +423,6 @@ async def main():
         
     await set_bot_commands()
     
-    # Ініціалізація глобальної сесії для всіх HTTP-запитів
     http_session = aiohttp.ClientSession(headers=HEADERS)
     
     await bot.delete_webhook(drop_pending_updates=True)
@@ -426,6 +432,6 @@ async def main():
     try:
         await dp.start_polling(bot)
     finally:
-        await http_session.close() # Закриваємо сесію коректно при вимкненні бота
+        await http_session.close()
 
 if __name__ == "__main__": asyncio.run(main())
