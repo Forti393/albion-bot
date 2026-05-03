@@ -95,7 +95,6 @@ async def download_items():
                 data = await r.json(content_type=None)
                 allowed = ["weapon","armor","plate","leather","cloth","bag","cape","potion","meal","mount","tool","offhand"]
                 items_data = {i["UniqueName"]: i for i in data if i.get("UniqueName","").startswith(("T4_","T5_","T6_","T7_","T8_")) and any(x in i.get("UniqueName","").lower() for x in allowed)}
-                logger.info(f"✅ БД завантажена: {len(items_data)} предметів.")
                 is_db_ready = True
     except: is_db_ready = True
 
@@ -150,7 +149,7 @@ async def scan_logic(d, f_c=None, t_c=None):
         res = []
         for item in pre_res[:25]:
             vol = await get_item_liquidity(item['id'].split("@")[0], item['to'])
-            profit_margin = item['p_n'] / item['buy']
+            profit_margin = item['p_n'] / (item['buy'] if item['buy'] > 0 else 1)
             if vol > 0 or profit_margin <= 0.15:
                 item['vol'] = vol
                 res.append(item)
@@ -170,14 +169,23 @@ async def disp_res(msg, res, d):
         
         tbd, tsd = fmt_t(r.get('bd')), fmt_t(r.get('sd'))
         
-        # Логіка ювелірного вирівнювання через <pre>
-        profit_header = "Прибуток:".ljust(18)
-        demand_header = "Попит:" if show_liq else ""
+        # --- ЮВЕЛІРНА ВЕРСТКА ТАБЛИЦІ ПРИБУТКУ ТА ПОПИТУ ---
+        # Визначаємо ширину колонки для вирівнювання (14 символів)
+        p_p_f = f"{r['p_p']:,}"
+        p_n_f = f"{r['p_n']:,}"
+        vol_f = f"{r.get('vol', 0)} шт/д"
         
-        line_crown = f"👑 {r['p_p']:,}".ljust(18)
-        line_demand = f"{r.get('vol', 0)} шт/д" if show_liq else ""
-        
-        line_skull = f"💀 {r['p_n']:,}".ljust(18)
+        # Формуємо шапку і рядки всередині <pre>
+        if show_liq:
+            header = f"{'Прибуток:':<16}Попит:"
+            # Емодзі займають 2 візуальних місця, тому коригуємо відступи вручну
+            # "👑 " + "1,000,000" (9) + "     " (5) = 16
+            line1  = f"👑 {p_p_f:<13}{vol_f}"
+            line2  = f"💀 {p_n_f:<13}"
+        else:
+            header = "Прибуток:"
+            line1  = f"👑 {p_p_f}"
+            line2  = f"💀 {p_n_f}"
 
         item_block = (
             f"{idx}) {icon} <b>{name}</b> [{tier}.{enc}]\n"
@@ -185,17 +193,16 @@ async def disp_res(msg, res, d):
             f"📥 {CITY_EMOJIS[r['from']]} {r['buy']:,} | 🕒 {tbd}\n"
             f"📤 {CITY_EMOJIS[r['to']]} {r['sell']:,} | 🕒 {tsd}\n"
             f"<pre>"
-            f"{profit_header}{demand_header}\n"
-            f"{line_crown}{line_demand}\n"
-            f"{line_skull}"
+            f"{header}\n"
+            f"{line1}\n"
+            f"{line2}"
             f"</pre>\n\n" # Подвійний відступ між предметами
         )
         
         if len(full_text) + len(item_block) > 3900: 
             messages.append(full_text); full_text = item_block
-        else: 
-            full_text += item_block
-            
+        else: full_text += item_block
+        
     if full_text: messages.append(full_text)
     for t in messages: await msg.answer(t, parse_mode=ParseMode.HTML)
 
