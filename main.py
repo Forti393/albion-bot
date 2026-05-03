@@ -103,6 +103,19 @@ async def get_item_liquidity(item_id, city):
         except: pass
     return {"vol": 0, "avg": 0}
 
+def passes_soft_filter(sell_price, liq_data, multiplier=2.0, active_vol=4):
+    vol = liq_data.get('vol', 0)
+    avg7 = liq_data.get('avg', 0)
+    
+    if vol >= active_vol:
+        return True, "active_market"
+    if vol >= 1 and avg7 > 0:
+        if sell_price <= (avg7 * multiplier):
+            return True, "reliable_price"
+        else:
+            return False, "price_too_high"
+    return False, "low_vol_no_data"
+
 async def download_items():
     global items_data, is_db_ready, http_session
     try:
@@ -169,17 +182,18 @@ async def scan_logic(d, f_c=None, t_c=None):
         pre_res.sort(key=lambda x: x['p_n'], reverse=True)
         res = []
         for item in pre_res[:20]:
-            l_d = await get_item_liquidity(item['id'].split("@")[0], item['to'])
-            # --- М'ЯКИЙ ФІЛЬТР ---
-            # Умова 1: Продано 4+ шт/д
-            # Умова 2: Продано хоча б 1 шт і ціна не завищена більше ніж у 2.5 рази від сер.7дн
-            is_active = l_d["vol"] >= 4
-            is_reliable = l_d["vol"] >= 1 and (item['sell'] <= l_d["avg"] * 2.5)
+            liq_data = await get_item_liquidity(item['id'].split("@")[0], item['to'])
             
-            if is_active or is_reliable:
-                item['vol'] = l_d["vol"]
-                item['avg_7'] = l_d["avg"]
+            # Використання Soft Filter (Shadow Mode logging)
+            passed, reason = passes_soft_filter(item['sell'], liq_data, multiplier=2.0)
+            
+            if passed:
+                item['vol'] = liq_data["vol"]
+                item['avg_7'] = liq_data["avg"]
                 res.append(item)
+            else:
+                logger.info(f"🚫 Shadow Filter: {item['id']} rejected. Reason: {reason}. Sell: {item['sell']}, Avg7: {liq_data['avg']}")
+                
         return res
     return pre_res
 
