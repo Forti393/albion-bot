@@ -1,4 +1,4 @@
-import os, json, aiohttp, asyncio
+import os, json, aiohttp, asyncio, re
 from datetime import datetime, UTC, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode
@@ -32,10 +32,10 @@ class BotState(StatesGroup):
 # ================= ФУНКЦІЇ ВІЗУАЛУ =================
 def get_item_icon(unique_name):
     un = unique_name.lower()
-    if any(x in un for x in ["hood", "cowl", "helmet"]): return "🪖"
-    if any(x in un for x in ["armor", "jacket", "robe"]): return "🧥"
-    if any(x in un for x in ["shoes", "boots"]): return "🥾"
-    if any(x in un for x in ["sword", "axe", "bow", "staff", "hammer", "mace", "dagger", "spear"]): return "⚔️"
+    if any(x in un for x in ["hood", "cowl", "helmet", "cap"]): return "🪖"
+    if any(x in un for x in ["armor", "jacket", "robe", "garb"]): return "🧥"
+    if any(x in un for x in ["shoes", "boots", "sandals"]): return "🥾"
+    if any(x in un for x in ["sword", "axe", "bow", "staff", "hammer", "mace", "dagger", "spear", "glove"]): return "⚔️"
     if "bag" in un: return "🎒"
     if "cape" in un: return "🧣"
     if "mount" in un: return "🐴"
@@ -212,29 +212,47 @@ async def to_cb(cb, state: FSMContext):
     await cb.answer(); t = cb.data.split("_")[1]; await state.update_data(t_c=t, mode="custom"); d = await state.get_data(); await state.set_state(None); await cb.message.delete()
     await cb.message.answer(f"🚀 Маршрут <b>{d['f_c']} ➔ {t}</b> встановлено!\n\n🚀 Тисни <b>\"Запустити сканер\"</b>", reply_markup=get_main_kb(d), parse_mode=ParseMode.HTML)
 
+# ================= ВИВІД РЕЗУЛЬТАТІВ =================
 async def disp_res(msg, res):
     if not res: return
     res.sort(key=lambda x: x['p_n'], reverse=True)
     full_text = ""; messages = []
+    
     for idx, r in enumerate(res[:15], 1):
-        b_id = r['id'].split("@")[0]; enc = r['id'].split("@")[1] if "@" in r['id'] else "0"
+        b_id = r['id'].split("@")[0]
+        enc = r['id'].split("@")[1] if "@" in r['id'] else "0"
+        tier = b_id.split('_')[0][1:] # Отримуємо цифру Тіру (наприклад "4", "5")
+        
+        # Беремо назву з БД
         name = items_data.get(b_id, {}).get("LocalizedNames", {}).get("RU-RU", b_id)
+        
+        # ВИДАЛЯЄМО все, що в дужках (наприклад " (Эксперт)", " (Мастер)")
+        name = re.sub(r'\s*\([^)]*\)', '', name)
+        
+        # Додатково чистимо від сміття без дужок (якщо таке є)
         for t in TRASH: name = name.replace(t, "")
+        
         icon = get_item_icon(b_id)
-        item_text = (f"{idx}) {icon} <b>{name.upper()}</b> <code>[{b_id.split('_')[0][1:]}.{enc}]</code>\n"
+        
+        item_text = (f"{idx}) {icon} <b>{name.upper()}</b> 🔸 <b>[{tier}.{enc}]</b>\n"
                      f"✨ Качество: <b>{QUALITY_NAMES.get(r['q'], 'Обычное')}</b>\n"
                      f"──────────────────\n"
                      f"📥 <b>КУПІВЛЯ:</b> {CITY_EMOJIS[r['from']]} {r['from']}\n"
-                     f"💰 Ціна: <code>{r['buy']:,}</code> (⏳ <b>{fmt_t(r['bd'])}</b>)\n\n"
+                     f"💰 Цена: <code>{r['buy']:,}</code> (⏳ <b>{fmt_t(r['bd'])}</b>)\n\n"
                      f"📤 <b>ПРОДАЖ:</b> {CITY_EMOJIS[r['to']]} {r['to']}\n"
-                     f"💰 Ціна: <code>{r['sell']:,}</code> (⏳ <b>{fmt_t(r['sd'])}</b>)\n"
+                     f"💰 Цена: <code>{r['sell']:,}</code> (⏳ <b>{fmt_t(r['sd'])}</b>)\n"
                      f"──────────────────\n"
                      f"💵 <b>ПРИБУТОК:</b>\n"
                      f"👑 Преміум: <code>+{r['p_p']:,}</code>\n"
                      f"💀 Без према: <code>+{r['p_n']:,}</code>\n"
                      f"──────────────────\n\n")
-        if len(full_text) + len(item_text) > 3900: messages.append(full_text); full_text = item_text
-        else: full_text += item_text
+        
+        if len(full_text) + len(item_text) > 3900: 
+            messages.append(full_text)
+            full_text = item_text
+        else: 
+            full_text += item_text
+            
     if full_text: messages.append(full_text)
     for text in messages: await msg.answer(text, parse_mode=ParseMode.HTML)
 
@@ -266,3 +284,4 @@ async def main():
     asyncio.create_task(download_items()); await dp.start_polling(bot)
 
 if __name__ == "__main__": asyncio.run(main())
+
