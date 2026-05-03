@@ -1,4 +1,4 @@
-import os, json, aiohttp, asyncio, re, logging, time, signal, random, html
+import os, json, aiohttp, asyncio, re, logging, time, signal, random, html, statistics
 from datetime import datetime, timezone
 from typing import List, Optional
 from aiogram import Bot, Dispatcher, types, F
@@ -38,7 +38,6 @@ CACHE_TTL = 3600
 CITIES = ["Bridgewatch", "Martlock", "Lymhurst", "Thetford", "Fort Sterling", "Caerleon", "Brecilien", "Black Market"]
 CITY_EMOJIS = {"Lymhurst":"🟢","Martlock":"🔵","Caerleon":"⚫","Thetford":"🟣","Bridgewatch":"🟠","Fort Sterling":"⚪","Brecilien":"🌸","Black Market":"💀"}
 QUALITY_NAMES = {1:"Обычное", 2:"Хорошее", 3:"Выдающееся", 4:"Отличное", 5:"Шедевр"}
-TRASH = ["Знаток ","Мастер ","Великий мастер ","Старейшина ","Ученик ","Новичок "]
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 class BotState(StatesGroup):
@@ -96,24 +95,29 @@ async def get_item_liquidity(item_id, city):
                         h_d = data[0]['data']
                         vol = h_d[-1].get('item_count', 0)
                         prices = [d['avg_price'] for d in h_d[-7:] if d['avg_price'] > 0]
-                        avg = int(sum(prices) / len(prices)) if prices else 0
+                        # Використовуємо МЕДІАНУ для захисту від аномалій
+                        avg = int(statistics.median(prices)) if prices else 0
                         res = {"vol": vol, "avg": avg}
                         history_cache[cache_key] = {'data': res, 'time': now}
                         return res
         except: pass
     return {"vol": 0, "avg": 0}
 
-def passes_soft_filter(sell_price, liq_data, multiplier=2.0, active_vol=4):
+def passes_soft_filter(sell_price, liq_data, multiplier=2.2, active_vol=4):
     vol = liq_data.get('vol', 0)
     avg7 = liq_data.get('avg', 0)
     
+    # Пріоритет 1: Великий об'єм - завжди добре
     if vol >= active_vol:
         return True, "active_market"
+    
+    # Пріоритет 2: Малий об'єм, але ціна в межах розумного
     if vol >= 1 and avg7 > 0:
         if sell_price <= (avg7 * multiplier):
             return True, "reliable_price"
         else:
             return False, "price_too_high"
+            
     return False, "low_vol_no_data"
 
 async def download_items():
@@ -184,15 +188,15 @@ async def scan_logic(d, f_c=None, t_c=None):
         for item in pre_res[:20]:
             liq_data = await get_item_liquidity(item['id'].split("@")[0], item['to'])
             
-            # Використання Soft Filter (Shadow Mode logging)
-            passed, reason = passes_soft_filter(item['sell'], liq_data, multiplier=2.0)
+            # Shadow Mode Filtering
+            passed, reason = passes_soft_filter(item['sell'], liq_data)
             
             if passed:
                 item['vol'] = liq_data["vol"]
                 item['avg_7'] = liq_data["avg"]
                 res.append(item)
             else:
-                logger.info(f"🚫 Shadow Filter: {item['id']} rejected. Reason: {reason}. Sell: {item['sell']}, Avg7: {liq_data['avg']}")
+                logger.info(f"🚫 Filter: {item['id']} rejected ({reason}). Sell: {item['sell']}, Median7: {liq_data['avg']}")
                 
         return res
     return pre_res
@@ -206,13 +210,12 @@ async def disp_res(msg, res, d):
         enc = r['id'].split("@")[1] if "@" in r['id'] else "0"; tier = b_id.split('_')[0][1:]
         name = items_data.get(b_id, {}).get("LocalizedNames", {}).get("RU-RU", b_id)
         name = re.sub(r'\s*\([^)]*\)', '', name); name = html.escape(name.upper())
-        for t in TRASH: name = name.replace(t, "")
         tbd, tsd = fmt_t(r.get('bd')), fmt_t(r.get('sd'))
         
         liq_part = ""
         if show_liq:
             liq_part = (f"          📦 <b>{r.get('vol','?')} шт/д</b>\n"
-                        f"          📊 <b>{r.get('avg_7', 0):,} ср.7дн</b>\n")
+                        f"          📊 <b>{r.get('avg_7', 0):,} мед.7дн</b>\n")
 
         item_block = (
             f"{idx}) {icon} <b>{name}</b> [{tier}.{enc}]\n"
@@ -265,7 +268,7 @@ async def toggle_liq(m, state: FSMContext):
 @dp.message(Command("help"), StateFilter('*'))
 async def cmd_help(m, state: FSMContext):
     await state.set_state(None)
-    await m.answer("📖 <b>Допомога:</b>\n1. Налаштуй Бюджет.\n2. Обери Режим.\n3. Тисни Сканер.\n⚡ 30хв — свіжість цін.\n📊 Попит — активність ринку (сер. за 7дн).", parse_mode=ParseMode.HTML)
+    await m.answer("📖 <b>Допомога:</b>\n1. Налаштуй Бюджет.\n2. Обери Режим.\n3. Тисни Сканер.\n⚡ 30хв — свіжість цін.\n📊 Попит — активність ринку (мед. за 7дн).", parse_mode=ParseMode.HTML)
 
 @dp.message(F.text == "🗺 Режим", StateFilter('*'))
 async def choose_mode(m, state):
