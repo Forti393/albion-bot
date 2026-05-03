@@ -167,20 +167,20 @@ async def disp_res(msg, res, d):
         for t in TRASH: name = name.replace(t, "")
         
         tbd, tsd = fmt_t(r.get('bd')), fmt_t(r.get('sd'))
-        # Переміщено вліво (без зайвих пробілів)
         liq_line = f"📊 <b>{r.get('vol', 0)} шт/д</b>\n" if show_liq else ""
         
+        # Вирівнювання прибутку по центру
         item_block = (
             f"{idx}) {icon} <b>{name}</b> [{tier}.{enc}]\n"
             f"✨ {QUALITY_NAMES.get(r['q'], 'Обычное')}\n"
             f"📥 {CITY_EMOJIS[r['from']]} {r['buy']:,} | 🕒 {tbd}\n"
             f"📤 {CITY_EMOJIS[r['to']]} {r['sell']:,} | 🕒 {tsd}\n"
             f"{liq_line}"
-            f"<b>Прибуток:</b>\n"
-            f"<blockquote>"
-            f"👑 {r['p_p']:,}\n"
-            f"💀 {r['p_n']:,}"
-            f"</blockquote>\n\n"
+            f"<pre>"
+            f"      Прибуток:\n"
+            f"      👑 {r['p_p']:,}\n"
+            f"      💀 {r['p_n']:,}"
+            f"</pre>\n\n"
         )
         if len(full_text) + len(item_block) > 3900: messages.append(full_text); full_text = item_block
         else: full_text += item_block
