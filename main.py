@@ -229,15 +229,14 @@ async def set_limit_cb(cb, state: FSMContext):
         await cb.answer()
         t = cb.data.split("_")[2]
         cancel_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❌ Скасувати")]], resize_keyboard=True)
+        await safe_delete(cb.message) # Тут видаляємо, щоб меню налаштувань не висіло в історії
         
         if t == "buy":
             await state.set_state(BotState.waiting_for_buy_limit)
-            await cb.message.answer("💰 Введи макс. ціну покупки (лише цифри):", reply_markup=cancel_kb)
+            await bot.send_message(cb.from_user.id, "💰 Введи макс. ціну покупки (лише цифри):", reply_markup=cancel_kb)
         else:
             await state.set_state(BotState.waiting_for_profit_limit)
-            await cb.message.answer("📈 Введи мін. чистий профіт:", reply_markup=cancel_kb)
-            
-        await safe_delete(cb.message) # Видаляємо ПІСЛЯ відправки нового
+            await bot.send_message(cb.from_user.id, "📈 Введи мін. чистий профіт:", reply_markup=cancel_kb)
     except Exception as e: logger.error(f"Помилка в set_limit_cb: {e}")
 
 @dp.message(F.text == "🧮 Калькулятор", StateFilter('*'))
@@ -260,8 +259,7 @@ async def h_calc(m, state: FSMContext):
             await state.update_data(b=v); await state.set_state(BotState.calc_sell); await m.answer("📤 Введи ціну ПРОДАЖУ (за 1 шт):")
         else:
             d = await state.get_data(); cnt, buy = d.get('c', 1), d.get('b', 0)
-            
-            if cnt <= 0 or buy <= 0: # Додаткова валідація минулих кроків
+            if cnt <= 0 or buy <= 0: 
                 await state.set_state(None)
                 return await m.answer("❌ Помилка у попередніх введеннях! Запусти калькулятор наново.")
                 
@@ -295,38 +293,45 @@ async def h_limits(m, state: FSMContext):
 @dp.callback_query(F.data.startswith("set_mode_"), StateFilter('*'))
 async def set_mode_cb(cb, state: FSMContext):
     try:
-        await cb.answer(); m = cb.data.split("_")[2]
-        await state.update_data(mode=m); d = await state.get_data()
+        await cb.answer()
+        m = cb.data.split("_")[2]
+        await state.update_data(mode=m)
+        d = await state.get_data()
         
-        if m == "all": 
-            await cb.message.answer("🌍 Режим: <b>Всі міста</b> встановлено!\n\n🚀 Тисни <b>\"Запустити сканер\"</b>", reply_markup=get_main_kb(d), parse_mode=ParseMode.HTML)
+        if m == "all":
+            await safe_delete(cb.message) # Якщо 'Всі міста', треба надіслати ReplyKeyboard, тому видаляємо інлайн
+            await bot.send_message(cb.from_user.id, "🌍 Режим: <b>Всі міста</b> встановлено!\n\n🚀 Тисни <b>\"Запустити сканер\"</b>", reply_markup=get_main_kb(d), parse_mode=ParseMode.HTML)
         else:
             await state.set_state(BotState.picking_from)
-            await cb.message.answer("📍 Звідки веземо товар?", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{CITY_EMOJIS[c]} {c}", callback_data=f"city_{c}")] for c in CITIES if c!="Black Market"]))
-            
-        await safe_delete(cb.message)
+            # РЕДАГУЄМО повідомлення замість видалення - це крутий UX
+            await cb.message.edit_text("📍 Звідки веземо товар?", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{CITY_EMOJIS[c]} {c}", callback_data=f"city_{c}")] for c in CITIES if c!="Black Market"]))
     except Exception as e: logger.error(f"Помилка в set_mode_cb: {e}")
 
 @dp.callback_query(StateFilter(BotState.picking_from), F.data.startswith("city_"))
 async def from_cb(cb, state: FSMContext):
     try:
         await cb.answer(); c = cb.data.split("_")[1]; await state.update_data(f_c=c); await state.set_state(BotState.picking_to)
-        await cb.message.answer(f"✅ Звідки: {c}\n📍 Тепер обери куди (Пункт Б):", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{CITY_EMOJIS[ci]} {ci}", callback_data=f"city_{ci}")] for ci in CITIES if ci!=c and ci!="Black Market"]))
-        await safe_delete(cb.message)
+        # Плавно редагуємо поточну менюшку
+        await cb.message.edit_text(f"✅ Звідки: {c}\n📍 Тепер обери куди (Пункт Б):", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{CITY_EMOJIS[ci]} {ci}", callback_data=f"city_{ci}")] for ci in CITIES if ci!=c and ci!="Black Market"]))
     except Exception as e: logger.error(f"Помилка в from_cb: {e}")
 
 @dp.callback_query(StateFilter(BotState.picking_to), F.data.startswith("city_"))
 async def to_cb(cb, state: FSMContext):
     try:
         await cb.answer(); t = cb.data.split("_")[1]; await state.update_data(t_c=t, mode="custom"); d = await state.get_data(); await state.set_state(None)
-        await cb.message.answer(f"🚀 Маршрут <b>{d['f_c']} ➔ {t}</b> встановлено!\n\n🚀 Тисни <b>\"Запустити сканер\"</b>", reply_markup=get_main_kb(d), parse_mode=ParseMode.HTML)
         await safe_delete(cb.message)
+        await bot.send_message(cb.from_user.id, f"🚀 Маршрут <b>{d['f_c']} ➔ {t}</b> встановлено!\n\n🚀 Тисни <b>\"Запустити сканер\"</b>", reply_markup=get_main_kb(d), parse_mode=ParseMode.HTML)
     except Exception as e: logger.error(f"Помилка в to_cb: {e}")
 
-@dp.message(F.text.contains("ціни (30хв)") | F.text.contains("Вимкнути фільтр"), StateFilter('*'))
+@dp.message(F.text.in_(["⚡ Свіжі ціни (30хв)", "🚫 Вимкнути фільтр 30хв"]), StateFilter('*'))
 async def toggle_extra(m, state: FSMContext):
-    d = await state.get_data(); val = not d.get("extra", False); await state.update_data(extra=val)
-    d = await state.get_data(); await m.answer(f"⚡ Фільтр 30хв: {'УВІМК' if val else 'ВИМК'}", reply_markup=get_main_kb(d))
+    d = await state.get_data()
+    val = not d.get("extra", False)
+    await state.update_data(extra=val)
+    d = await state.get_data()
+    
+    status_msg = "✅ Фільтр 30хв <b>увімкнутий</b> — показуватимуться тільки свіжі ціни (до 30 хв)." if val else "❌ Фільтр 30хв <b>відключений</b> — показуватимуться всі доступні угоди."
+    await m.answer(status_msg, parse_mode=ParseMode.HTML, reply_markup=get_main_kb(d))
 
 async def disp_res(msg, res):
     if not res: return
@@ -366,7 +371,7 @@ async def adm_upd(cb):
     await cb.answer()
 
 @dp.callback_query(F.data == "conf_res")
-async def conf_res(cb, state: FSMContext): await state.clear(); await cb.answer(); await safe_delete(cb.message); await cb.message.answer("🔄 Все скинуто!", reply_markup=get_start_kb())
+async def conf_res(cb, state: FSMContext): await state.clear(); await cb.answer(); await safe_delete(cb.message); await bot.send_message(cb.from_user.id, "🔄 Все скинуто!", reply_markup=get_start_kb())
 
 @dp.callback_query(F.data == "cancel_res")
 async def cancel_res(cb): await cb.answer(); await safe_delete(cb.message)
