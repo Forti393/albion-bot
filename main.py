@@ -1,4 +1,4 @@
-import os, json, aiohttp, asyncio, re, logging, time, signal
+import os, json, aiohttp, asyncio, re, logging, time, signal, random
 from datetime import datetime, UTC, timedelta
 from typing import List, Optional
 from aiogram import Bot, Dispatcher, types, F
@@ -18,7 +18,7 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 TOKEN = os.environ.get("BOT_TOKEN")
 
 if not TOKEN:
-    logger.error("🚨 BOT_TOKEN відсутній! Перевір змінні в Railway.")
+    logger.error("🚨 КРИТИЧНО: BOT_TOKEN відсутній у Railway Variables!")
     exit(1)
 
 bot = Bot(token=TOKEN)
@@ -46,7 +46,7 @@ class BotState(StatesGroup):
     picking_from = State(); picking_to = State()
     calc_count = State(); calc_buy = State(); calc_sell = State()
 
-# ================= СЛУЖБОВІ ФУНКЦІЇ =================
+# ================= СЕРВІСНІ ФУНКЦІЇ =================
 async def safe_delete(msg):
     try: await msg.delete()
     except: pass
@@ -62,8 +62,10 @@ async def cleanup_cooldowns():
         logger.info("Фонова очистка кулдаунів зупинена.")
 
 async def set_bot_commands():
-    cmds = [types.BotCommand(command="start", description="🚀 Головне меню"), types.BotCommand(command="help", description="📖 Допомога")]
-    await bot.set_my_commands(cmds)
+    try:
+        cmds = [types.BotCommand(command="start", description="🚀 Головне меню"), types.BotCommand(command="help", description="📖 Допомога")]
+        await bot.set_my_commands(cmds)
+    except: logger.warning("Не вдалося встановити команди меню.")
 
 def get_item_icon(unique_name):
     un = unique_name.lower()
@@ -78,7 +80,7 @@ def get_item_icon(unique_name):
 
 async def get_item_liquidity(item_id, city):
     global http_session
-    if not http_session or is_shutting_down: return 0
+    if not http_session or http_session.closed or is_shutting_down: return 0
     
     cache_key, now = f"{item_id}|{city}", datetime.now(UTC)
     if cache_key in history_cache and (now - history_cache[cache_key]['time']).total_seconds() < CACHE_TTL:
@@ -94,32 +96,27 @@ async def get_item_liquidity(item_id, city):
                         vol = data[0]['data'][-1].get('item_count', 0)
                         history_cache[cache_key] = {'volume': vol, 'time': now}
                         return vol
-                else:
-                    logger.warning(f"HTTP {resp.status} при запиті історії {item_id}")
         except: pass
     return 0
 async def download_items():
     global items_data, is_db_ready, http_session
-    if not http_session: return
+    if not http_session or http_session.closed: return
     try:
         async with http_session.get("https://raw.githubusercontent.com/ao-data/ao-bin-dumps/master/formatted/items.json", timeout=60) as r:
             if r.status == 200:
                 data = await r.json(content_type=None)
                 allowed = ["weapon","armor","plate","leather","cloth","bag","cape","potion","meal","mount","tool","offhand"]
                 items_data = {i["UniqueName"]: i for i in data if i.get("UniqueName","").startswith(("T4_","T5_","T6_","T7_","T8_")) and any(x in i.get("UniqueName","").lower() for x in allowed)}
-                logger.info("✅ База даних завантажена успішно.")
+                logger.info(f"✅ БД завантажена: {len(items_data)} предметів.")
                 is_db_ready = True
-            else:
-                logger.error(f"Не вдалося завантажити БД: статус {r.status}")
-    except asyncio.CancelledError:
-        logger.info("Завантаження бази скасовано.")
+    except asyncio.CancelledError: pass
     except Exception as e:
         logger.error(f"Помилка завантаження бази: {e}")
-        is_db_ready = True # Дозволяємо роботу, можливо частина даних є
+        is_db_ready = True
 
 async def scan_logic(d, f_c=None, t_c=None):
     global http_session
-    if not items_data or not http_session or is_shutting_down: return []
+    if not items_data or not http_session or http_session.closed or is_shutting_down: return []
     
     pre_res = []; b_l, p_l = d.get("buy_limit", 0), d.get("profit_limit", 4000)
     ext, check_liq = d.get("extra", False), d.get("check_liq", False)
@@ -131,17 +128,15 @@ async def scan_logic(d, f_c=None, t_c=None):
         data = None
         async with scan_semaphore:
             for attempt in range(3):
-                if is_shutting_down: break
+                if is_shutting_down or not http_session or http_session.closed: break
                 try:
                     async with http_session.get(url, timeout=20) as resp:
                         if resp.status == 429: 
-                            await asyncio.sleep(2 ** attempt)
+                            wait = (2 ** attempt) + random.random() # Експонента + Jitter
+                            await asyncio.sleep(wait)
                             continue
-                        if resp.status == 200: 
-                            data = await resp.json()
-                            break
-                        else:
-                            logger.warning(f"API статус {resp.status} для батчу {i}")
+                        if resp.status == 200: data = await resp.json(); break
+                        else: logger.warning(f"Статус {resp.status} для {url}")
                 except: await asyncio.sleep(1)
             
         if not data: continue
@@ -233,7 +228,7 @@ async def disp_res(msg, res, show_vol):
     if full_text: messages.append(full_text)
     for t in messages: await msg.answer(t, parse_mode=ParseMode.HTML)
 
-# --- Допоміжні функції (Бюджет, Калькулятор, Допомога) ---
+# --- Допоміжні функції ---
 @dp.message(F.text == "❓ Допомога", StateFilter('*'))
 @dp.message(Command("help"), StateFilter('*'))
 async def cmd_help(m, state: FSMContext):
@@ -311,7 +306,7 @@ async def cancel_res(cb): await cb.message.delete()
 @dp.message(Command("start"), StateFilter('*'))
 async def cmd_start(m, state: FSMContext): await state.clear(); await m.answer("👋 Бот готовий!", reply_markup=get_start_kb())
 
-# --- Фінальний Shutdown та Main ---
+# --- Shutdown & Main ---
 async def shutdown():
     global is_shutting_down, http_session
     if is_shutting_down: return
@@ -332,10 +327,9 @@ async def shutdown():
         logger.info("HTTP сесію закрито.")
     
     try:
-        await bot.close()
-        logger.info("З'єднання з Telegram закрите.")
-    except:
-        logger.exception("Помилка при закритті бота.")
+        await bot.session.close()
+        logger.info("Бот повністю зупинений.")
+    except: pass
 
 def signal_handler(loop):
     def handler(): asyncio.create_task(shutdown())
@@ -364,7 +358,5 @@ async def main():
         await shutdown()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        pass
+    try: asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit): pass
