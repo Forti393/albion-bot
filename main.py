@@ -18,7 +18,7 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 TOKEN = os.environ.get("BOT_TOKEN")
 
 if not TOKEN:
-    logger.error("🚨 КРИТИЧНО: BOT_TOKEN відсутній!")
+    logger.error("🚨 КРИТИЧНО: BOT_TOKEN відсутній у Railway Variables!")
     exit(1)
 
 bot = Bot(token=TOKEN)
@@ -95,7 +95,8 @@ async def get_item_liquidity(item_id, city):
                         vol = data[0]['data'][-1].get('item_count', 0)
                         history_cache[cache_key] = {'volume': vol, 'time': now}
                         return vol
-        except: pass
+        except Exception as e:
+            logger.debug(f"Помилка ліквідності: {e}")
     return 0
 
 async def download_items():
@@ -109,7 +110,7 @@ async def download_items():
                 logger.info(f"✅ БД завантажена: {len(items_data)} предметів.")
                 is_db_ready = True
     except Exception as e:
-        logger.error(f"Помилка бази: {e}")
+        logger.error(f"Помилка завантаження бази: {e}")
         is_db_ready = True
 async def scan_logic(d, f_c=None, t_c=None):
     global http_session
@@ -186,7 +187,7 @@ async def disp_res(msg, res, d):
             f"{idx}) {icon} <b>{name}</b> [{tier}.{enc}]\n"
             f"✨ {QUALITY_NAMES.get(r['q'], 'Обычное')}\n"
             f"📥 {CITY_EMOJIS[r['from']]} {r['buy']:,}\n"
-            f"📤 {CITY_EMOJIS[r['to']]} {r['sell']:,}\n\n"
+            f"📤 {CITY_EMOJIS[r['to']]} {r['sell']:,}\n"
             f"<pre>"
             f"             👑 {r['p_p']:,}   |   {tbd}\n"
             f"💵 Пр:\n"
@@ -239,17 +240,23 @@ async def choose_mode(m, state):
 @dp.callback_query(F.data.startswith("set_mode_"))
 async def set_mode_cb(cb, state: FSMContext):
     m = cb.data.split("_")[2]; await state.update_data(mode=m); await cb.answer()
+    logger.info(f"Режим обрано: {m}")
     if m == "all": await cb.message.answer("🌍 Всі міста!", reply_markup=get_main_kb(await state.get_data()))
     else: await state.set_state(BotState.picking_from); await cb.message.answer("Звідки:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{CITY_EMOJIS[c]} {c}", callback_data=f"city_{c}")] for c in CITIES if c!="Black Market"]))
 
 @dp.callback_query(F.data.startswith("city_"))
 async def city_pick(cb, state: FSMContext):
     await cb.answer()
-    curr = await state.get_state(); c = cb.data.split("_")[1]
-    if curr == BotState.picking_from:
+    curr = await state.get_state()
+    logger.info(f"Клік по місту: {cb.data}, поточний стан: {curr}")
+    
+    if not curr: return
+    c = cb.data.split("_")[1]
+    
+    if "picking_from" in curr:
         await state.update_data(f_c=c); await state.set_state(BotState.picking_to)
         await cb.message.edit_text(f"З: {c}. Куди:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{CITY_EMOJIS[ci]} {ci}", callback_data=f"city_{ci}")] for ci in CITIES if ci!=c and ci!="Black Market"]))
-    elif curr == BotState.picking_to:
+    elif "picking_to" in curr:
         await state.update_data(t_c=c, mode="custom"); await state.set_state(None)
         await cb.message.answer("✅ Готово!", reply_markup=get_main_kb(await state.get_data()))
 
@@ -275,11 +282,10 @@ async def h_limits(m, state: FSMContext):
 @dp.message(F.text == "🔄 Перезавантаження", StateFilter('*'))
 async def btn_res(m, state: FSMContext): await state.clear(); await m.answer("🔄 Скинуто!", reply_markup=get_main_kb({}))
 
-# --- ФІКС "ДОПОМОГИ" ---
+@dp.message(F.text.contains("Допомога"), StateFilter('*'))
 @dp.message(Command("help"), StateFilter('*'))
-@dp.message(F.text.contains("Допомога"), StateFilter('*')) # Тепер ловить будь-який текст, де є це слово
 async def cmd_help(m, state: FSMContext):
-    await m.answer("📖 <b>Інструкція:</b>\n1. Налаштуй бюджет.\n2. Обери режим (Всі міста або Шлях).\n3. Тисни Сканер.\n⚡ 30хв — фільтрує старі ціни.\n📊 Попит — показує об'єм торгів за добу.", parse_mode=ParseMode.HTML)
+    await m.answer("📖 <b>Інструкція:</b>\n1. Налаштуй бюджет.\n2. Обери режим.\n3. Тисни Сканер.\n⚡ 30хв — фільтрує старі ціни.\n📊 Попит — об'єм торгів за добу.", parse_mode=ParseMode.HTML)
 
 @dp.message(Command("start"), StateFilter('*'))
 async def cmd_start(m, state: FSMContext): await state.clear(); await m.answer("👋 Бот готовий!", reply_markup=get_main_kb({}))
