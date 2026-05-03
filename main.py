@@ -28,6 +28,9 @@ class BotState(StatesGroup):
     waiting_for_profit_limit = State()
     picking_from = State()
     picking_to = State()
+    calc_count = State() # ПОВЕРНУТО КАЛЬКУЛЯТОР
+    calc_buy = State()   # ПОВЕРНУТО КАЛЬКУЛЯТОР
+    calc_sell = State()  # ПОВЕРНУТО КАЛЬКУЛЯТОР
 
 # ================= ФУНКЦІЇ ВІЗУАЛУ =================
 def get_item_icon(unique_name):
@@ -174,10 +177,48 @@ async def set_limit_cb(cb, state: FSMContext):
         await state.set_state(BotState.waiting_for_profit_limit)
         await cb.message.answer("📈 Введи мін. чистий профіт:", reply_markup=cancel_kb)
 
-@dp.message(F.text == "❌ Скасувати", StateFilter(BotState.waiting_for_buy_limit, BotState.waiting_for_profit_limit))
+# --- ВІДНОВЛЕНИЙ КАЛЬКУЛЯТОР ---
+@dp.message(F.text == "🧮 Калькулятор", StateFilter('*'))
+async def calc_start(m, state: FSMContext):
+    await state.set_state(BotState.calc_count)
+    cancel_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❌ Скасувати")]], resize_keyboard=True)
+    await m.answer("📦 Введи кількість предметів:", reply_markup=cancel_kb)
+
+@dp.message(StateFilter(BotState.calc_count, BotState.calc_buy, BotState.calc_sell))
+async def h_calc(m, state: FSMContext):
+    try:
+        v = int(m.text.replace(" ", "").replace(",", ""))
+        curr = await state.get_state()
+        if "calc_count" in str(curr):
+            await state.update_data(c=v)
+            await state.set_state(BotState.calc_buy)
+            await m.answer("💰 Введи ціну КУПІВЛІ (за 1 шт):")
+        elif "calc_buy" in str(curr):
+            await state.update_data(b=v)
+            await state.set_state(BotState.calc_sell)
+            await m.answer("📤 Введи ціну ПРОДАЖУ (за 1 шт):")
+        else:
+            d = await state.get_data()
+            cnt, buy = d.get('c', 1), d.get('b', 0)
+            await state.set_state(None)
+            
+            p_prem = int((v * 0.935) - buy) * cnt
+            p_norm = int((v * 0.895) - buy) * cnt
+            
+            text = (f"📊 <b>Результат для {cnt} шт:</b>\n"
+                    f"──────────────────\n"
+                    f"👑 З Преміумом: <code>{p_prem:,}</code>\n"
+                    f"💀 Без према: <code>{p_norm:,}</code>\n"
+                    f"──────────────────")
+            await m.answer(text, reply_markup=get_main_kb(d), parse_mode=ParseMode.HTML)
+    except:
+        await m.answer("❌ Будь ласка, введи тільки число!")
+
+# --- ЗАГАЛЬНА КНОПКА СКАСУВАННЯ ---
+@dp.message(F.text == "❌ Скасувати", StateFilter(BotState.waiting_for_buy_limit, BotState.waiting_for_profit_limit, BotState.calc_count, BotState.calc_buy, BotState.calc_sell))
 async def cancel_limit(m, state: FSMContext):
     d = await state.get_data(); await state.set_state(None)
-    await m.answer("🚫 Введення скасовано.", reply_markup=get_main_kb(d))
+    await m.answer("🚫 Дію скасовано.", reply_markup=get_main_kb(d))
 
 @dp.message(StateFilter(BotState.waiting_for_buy_limit, BotState.waiting_for_profit_limit))
 async def h_limits(m, state: FSMContext):
@@ -221,15 +262,10 @@ async def disp_res(msg, res):
     for idx, r in enumerate(res[:15], 1):
         b_id = r['id'].split("@")[0]
         enc = r['id'].split("@")[1] if "@" in r['id'] else "0"
-        tier = b_id.split('_')[0][1:] # Отримуємо цифру Тіру (наприклад "4", "5")
+        tier = b_id.split('_')[0][1:]
         
-        # Беремо назву з БД
         name = items_data.get(b_id, {}).get("LocalizedNames", {}).get("RU-RU", b_id)
-        
-        # ВИДАЛЯЄМО все, що в дужках (наприклад " (Эксперт)", " (Мастер)")
         name = re.sub(r'\s*\([^)]*\)', '', name)
-        
-        # Додатково чистимо від сміття без дужок (якщо таке є)
         for t in TRASH: name = name.replace(t, "")
         
         icon = get_item_icon(b_id)
@@ -284,4 +320,3 @@ async def main():
     asyncio.create_task(download_items()); await dp.start_polling(bot)
 
 if __name__ == "__main__": asyncio.run(main())
-
