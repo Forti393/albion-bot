@@ -132,9 +132,7 @@ async def scan_logic(d, f_c=None, t_c=None):
                         if resp.status == 429: 
                             await asyncio.sleep((2 ** attempt) + random.random())
                             continue
-                        if resp.status == 200: 
-                            data = await resp.json()
-                            break
+                        if resp.status == 200: data = await resp.json(); break
                         else: logger.warning(f"API статус {resp.status} для {url}")
                 except: await asyncio.sleep(1)
         if not data: continue
@@ -185,12 +183,20 @@ def get_main_kb(d):
     liq_l = "📊 Попит: ON" if d.get("check_liq") else "📊 Попит: OFF"
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🚀 Запустити сканер")], [KeyboardButton(text=m_l), KeyboardButton(text=e_l)], [KeyboardButton(text=liq_l), KeyboardButton(text="🧮 Калькулятор")], [KeyboardButton(text="💰 Налаштувати бюджет"), KeyboardButton(text="🔄 Перезавантаження")], [KeyboardButton(text="❓ Допомога")]], resize_keyboard=True)
 
+def get_mode_inline():
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎲 Всі міста", callback_data="set_mode_all")], [InlineKeyboardButton(text="📍 Конкретний шлях", callback_data="set_mode_custom")]])
+
+@dp.message(F.text.in_(["🌍 Охоплення: Всі міста", "📍 Маршрут: Шлях", "🗺 Обрати режим"]), StateFilter('*'))
+async def choose_mode_handler(m: types.Message, state: FSMContext):
+    logger.info(f"Юзер {m.from_user.id} відкрив меню вибору режиму")
+    await m.answer("Оберіть режим сканування:", reply_markup=get_mode_inline())
+
 @dp.message(F.text == "🚀 Запустити сканер", StateFilter('*'))
 async def main_search(m, state: FSMContext):
     u_id, now = m.from_user.id, datetime.now(timezone.utc); d = await state.get_data(); is_admin = (u_id == ADMIN_ID)
     if not is_db_ready: return await m.answer("⏳ База вантажиться...")
     if d.get("buy_limit", 0) <= 0: return await m.answer("⚠️ Встанови бюджет!", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="💰 Налаштувати бюджет"), KeyboardButton(text="❌ Скасувати")]], resize_keyboard=True))
-    if not d.get("mode"): return await m.answer("🗺️ Обери режим!", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎲 Всі міста", callback_data="set_mode_all")], [InlineKeyboardButton(text="📍 Конкретний шлях", callback_data="set_mode_custom")]]))
+    if not d.get("mode"): return await m.answer("🗺️ Обери режим!", reply_markup=get_mode_inline())
     if not is_admin:
         async with active_scans_lock:
             if u_id in active_scans: return await m.answer("⚠️ Зачекай...")
@@ -240,6 +246,7 @@ async def limit_menu(m, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("set_limit_"))
 async def set_limit_cb(cb, state: FSMContext):
+    await cb.answer()
     t = cb.data.split("_")[2]; await state.set_state(BotState.waiting_for_buy_limit if t=="buy" else BotState.waiting_for_profit_limit)
     await cb.message.answer(f"Введи {'бюджет' if t=='buy' else 'мін. профіт'}:", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❌ Скасувати")]], resize_keyboard=True))
 
@@ -255,12 +262,15 @@ async def h_limits(m, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("set_mode_"))
 async def set_mode_cb(cb, state: FSMContext):
+    await cb.answer()
     m = cb.data.split("_")[2]; await state.update_data(mode=m)
+    logger.info(f"Вибрано режим: {m}")
     if m == "all": await cb.message.answer("🌍 Всі міста!", reply_markup=get_main_kb(await state.get_data()))
     else: await state.set_state(BotState.picking_from); await cb.message.answer("Звідки:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{CITY_EMOJIS[c]} {c}", callback_data=f"city_{c}")] for c in CITIES if c!="Black Market"]))
 
 @dp.callback_query(StateFilter(BotState.picking_from, BotState.picking_to), F.data.startswith("city_"))
 async def city_pick(cb, state: FSMContext):
+    await cb.answer()
     c = cb.data.split("_")[1]; curr = await state.get_state()
     if "from" in str(curr):
         await state.update_data(f_c=c); await state.set_state(BotState.picking_to)
@@ -285,21 +295,19 @@ async def h_calc(m, state: FSMContext):
 async def btn_res(m, state: FSMContext): await m.answer("Скинути все?", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Так", callback_data="conf_res"), InlineKeyboardButton(text="❌ Ні", callback_data="cancel_res")]]))
 
 @dp.callback_query(F.data == "conf_res")
-async def conf_res(cb, state: FSMContext): await state.clear(); await cb.message.answer("🔄 Скинуто!", reply_markup=get_start_kb())
+async def conf_res(cb, state: FSMContext): await cb.answer(); await state.clear(); await cb.message.answer("🔄 Скинуто!", reply_markup=get_start_kb())
 
 @dp.callback_query(F.data == "cancel_res")
-async def cancel_res(cb): await cb.message.delete()
+async def cancel_res(cb): await cb.answer(); await cb.message.delete()
 
 @dp.message(Command("start"), StateFilter('*'))
 async def cmd_start(m, state: FSMContext): await state.clear(); await m.answer("👋 Бот готовий!", reply_markup=get_start_kb())
 
 async def shutdown():
     global is_shutting_down, http_session
-    if is_shutting_down: 
-        logger.info("Shutdown вже викликаний — пропускаємо")
-        return
+    if is_shutting_down: return
     is_shutting_down = True
-    logger.info("Shutdown initiated: Вимкнення ресурсоємних процесів...")
+    logger.info("Вимкнення ресурсоємних процесів...")
     for t in background_tasks:
         if not t.done(): t.cancel()
     try: await asyncio.wait_for(asyncio.gather(*background_tasks, return_exceptions=True), timeout=5)
@@ -335,3 +343,4 @@ async def main():
 if __name__ == "__main__":
     try: asyncio.run(main())
     except (KeyboardInterrupt, SystemExit): pass
+
