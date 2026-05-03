@@ -9,22 +9,16 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
-# ================= ЛОГУВАННЯ =================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ================= КОНФІГУРАЦІЯ =================
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0")) 
 TOKEN = os.environ.get("BOT_TOKEN")
-
-if not TOKEN:
-    logger.error("🚨 КРИТИЧНО: BOT_TOKEN відсутній!")
-    exit(1)
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+if not TOKEN: exit(1)
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# Глобальні змінні
 items_data = {}; is_db_ready = False
 http_session: Optional[aiohttp.ClientSession] = None 
 scan_semaphore = asyncio.Semaphore(5) 
@@ -33,11 +27,11 @@ user_cooldowns = {}; active_scans = set(); history_cache = {}
 background_tasks: List[asyncio.Task] = []
 is_shutting_down = False
 
-# Константи
 CACHE_TTL = 3600 
 CITIES = ["Bridgewatch", "Martlock", "Lymhurst", "Thetford", "Fort Sterling", "Caerleon", "Brecilien", "Black Market"]
 CITY_EMOJIS = {"Lymhurst":"🟢","Martlock":"🔵","Caerleon":"⚫","Thetford":"🟣","Bridgewatch":"🟠","Fort Sterling":"⚪","Brecilien":"🌸","Black Market":"💀"}
 QUALITY_NAMES = {1:"Обычное", 2:"Хорошее", 3:"Выдающееся", 4:"Отличное", 5:"Шедевр"}
+TRASH = ["Знаток ","Мастер ","Великий мастер ","Старейшина ","Ученик ","Новичок "]
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 class BotState(StatesGroup):
@@ -45,7 +39,6 @@ class BotState(StatesGroup):
     picking_from = State(); picking_to = State()
     calc_count = State(); calc_buy = State(); calc_sell = State()
 
-# ================= СЛУЖБОВІ ФУНКЦІЇ =================
 async def safe_delete(msg):
     try: await msg.delete()
     except: pass
@@ -95,7 +88,6 @@ async def get_item_liquidity(item_id, city):
                         h_d = data[0]['data']
                         vol = h_d[-1].get('item_count', 0)
                         prices = [d['avg_price'] for d in h_d[-7:] if d['avg_price'] > 0]
-                        # Використовуємо МЕДІАНУ для захисту від аномалій
                         avg = int(statistics.median(prices)) if prices else 0
                         res = {"vol": vol, "avg": avg}
                         history_cache[cache_key] = {'data': res, 'time': now}
@@ -106,18 +98,10 @@ async def get_item_liquidity(item_id, city):
 def passes_soft_filter(sell_price, liq_data, multiplier=2.2, active_vol=4):
     vol = liq_data.get('vol', 0)
     avg7 = liq_data.get('avg', 0)
-    
-    # Пріоритет 1: Великий об'єм - завжди добре
-    if vol >= active_vol:
-        return True, "active_market"
-    
-    # Пріоритет 2: Малий об'єм, але ціна в межах розумного
+    if vol >= active_vol: return True, "active_market"
     if vol >= 1 and avg7 > 0:
-        if sell_price <= (avg7 * multiplier):
-            return True, "reliable_price"
-        else:
-            return False, "price_too_high"
-            
+        if sell_price <= (avg7 * multiplier): return True, "reliable_price"
+        else: return False, "price_too_high"
     return False, "low_vol_no_data"
 
 async def download_items():
@@ -181,23 +165,16 @@ async def scan_logic(d, f_c=None, t_c=None):
                         pre_res.append({'id':i_id,'q':int(q),'from':sc,'to':tc,'buy':buy,'sell':sell,
                                         'p_p':int(sell*0.935-buy),'p_n':p_n,'bd':bd_str,'sd':sd_str})
         if i % 300 == 0: await asyncio.sleep(0.1)
-    
     if check_liq and pre_res:
         pre_res.sort(key=lambda x: x['p_n'], reverse=True)
         res = []
         for item in pre_res[:20]:
             liq_data = await get_item_liquidity(item['id'].split("@")[0], item['to'])
-            
-            # Shadow Mode Filtering
             passed, reason = passes_soft_filter(item['sell'], liq_data)
-            
             if passed:
-                item['vol'] = liq_data["vol"]
-                item['avg_7'] = liq_data["avg"]
-                res.append(item)
+                item['vol'] = liq_data["vol"]; item['avg_7'] = liq_data["avg"]; res.append(item)
             else:
                 logger.info(f"🚫 Filter: {item['id']} rejected ({reason}). Sell: {item['sell']}, Median7: {liq_data['avg']}")
-                
         return res
     return pre_res
 
@@ -210,13 +187,12 @@ async def disp_res(msg, res, d):
         enc = r['id'].split("@")[1] if "@" in r['id'] else "0"; tier = b_id.split('_')[0][1:]
         name = items_data.get(b_id, {}).get("LocalizedNames", {}).get("RU-RU", b_id)
         name = re.sub(r'\s*\([^)]*\)', '', name); name = html.escape(name.upper())
+        for t in TRASH: name = name.replace(t, "")
         tbd, tsd = fmt_t(r.get('bd')), fmt_t(r.get('sd'))
-        
         liq_part = ""
         if show_liq:
             liq_part = (f"          📦 <b>{r.get('vol','?')} шт/д</b>\n"
                         f"          📊 <b>{r.get('avg_7', 0):,} мед.7дн</b>\n")
-
         item_block = (
             f"{idx}) {icon} <b>{name}</b> [{tier}.{enc}]\n"
             f"✨ {QUALITY_NAMES.get(r['q'], 'Обычное')}\n"
