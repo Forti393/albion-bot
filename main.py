@@ -13,17 +13,18 @@ from aiogram.fsm.storage.memory import MemoryStorage
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ================= НАЛАШТУВАННЯ ТА ЗАМКИ =================
+# ================= КОНФІГУРАЦІЯ =================
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0")) 
 TOKEN = os.environ.get("BOT_TOKEN")
 
 if not TOKEN:
-    logger.error("🚨 КРИТИЧНО: BOT_TOKEN не знайдено в змінних Railway!")
+    logger.error("🚨 BOT_TOKEN відсутній! Перевір змінні в Railway.")
     exit(1)
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
+# Глобальні змінні
 items_data = {}; is_db_ready = False
 http_session: Optional[aiohttp.ClientSession] = None 
 scan_semaphore = asyncio.Semaphore(5) 
@@ -31,8 +32,9 @@ active_scans_lock = asyncio.Lock()
 user_cooldowns = {}; active_scans = set(); history_cache = {}
 background_tasks: List[asyncio.Task] = []
 is_shutting_down = False
-CACHE_TTL = 3600 
 
+# Константи
+CACHE_TTL = 3600 
 CITIES = ["Bridgewatch", "Martlock", "Lymhurst", "Thetford", "Fort Sterling", "Caerleon", "Brecilien", "Black Market"]
 CITY_EMOJIS = {"Lymhurst":"🟢","Martlock":"🔵","Caerleon":"⚫","Thetford":"🟣","Bridgewatch":"🟠","Fort Sterling":"⚪","Brecilien":"🌸","Black Market":"💀"}
 QUALITY_NAMES = {1:"Обычное", 2:"Хорошее", 3:"Выдающееся", 4:"Отличное", 5:"Шедевр"}
@@ -44,7 +46,7 @@ class BotState(StatesGroup):
     picking_from = State(); picking_to = State()
     calc_count = State(); calc_buy = State(); calc_sell = State()
 
-# ================= СЕРВІСНІ ФУНКЦІЇ =================
+# ================= СЛУЖБОВІ ФУНКЦІЇ =================
 async def safe_delete(msg):
     try: await msg.delete()
     except: pass
@@ -57,7 +59,7 @@ async def cleanup_cooldowns():
             expired = [uid for uid, dt in user_cooldowns.items() if (now - dt).total_seconds() > 3600]
             for uid in expired: del user_cooldowns[uid]
     except asyncio.CancelledError:
-        logger.info("Задача очищення кулдаунів зупинена")
+        logger.info("Фонова очистка кулдаунів зупинена.")
 
 async def set_bot_commands():
     cmds = [types.BotCommand(command="start", description="🚀 Головне меню"), types.BotCommand(command="help", description="📖 Допомога")]
@@ -75,6 +77,9 @@ def get_item_icon(unique_name):
     return "📦"
 
 async def get_item_liquidity(item_id, city):
+    global http_session
+    if not http_session or is_shutting_down: return 0
+    
     cache_key, now = f"{item_id}|{city}", datetime.now(UTC)
     if cache_key in history_cache and (now - history_cache[cache_key]['time']).total_seconds() < CACHE_TTL:
         return history_cache[cache_key]['volume']
@@ -89,41 +94,56 @@ async def get_item_liquidity(item_id, city):
                         vol = data[0]['data'][-1].get('item_count', 0)
                         history_cache[cache_key] = {'volume': vol, 'time': now}
                         return vol
+                else:
+                    logger.warning(f"HTTP {resp.status} при запиті історії {item_id}")
         except: pass
     return 0
 async def download_items():
-    global items_data, is_db_ready
+    global items_data, is_db_ready, http_session
+    if not http_session: return
     try:
         async with http_session.get("https://raw.githubusercontent.com/ao-data/ao-bin-dumps/master/formatted/items.json", timeout=60) as r:
             if r.status == 200:
                 data = await r.json(content_type=None)
                 allowed = ["weapon","armor","plate","leather","cloth","bag","cape","potion","meal","mount","tool","offhand"]
                 items_data = {i["UniqueName"]: i for i in data if i.get("UniqueName","").startswith(("T4_","T5_","T6_","T7_","T8_")) and any(x in i.get("UniqueName","").lower() for x in allowed)}
-                logger.info("✅ БД завантажена")
+                logger.info("✅ База даних завантажена успішно.")
                 is_db_ready = True
+            else:
+                logger.error(f"Не вдалося завантажити БД: статус {r.status}")
     except asyncio.CancelledError:
-        logger.info("Завантаження БД скасовано")
+        logger.info("Завантаження бази скасовано.")
     except Exception as e:
-        logger.error(f"❌ Помилка БД: {e}")
+        logger.error(f"Помилка завантаження бази: {e}")
+        is_db_ready = True # Дозволяємо роботу, можливо частина даних є
 
 async def scan_logic(d, f_c=None, t_c=None):
-    if not items_data: return [] 
+    global http_session
+    if not items_data or not http_session or is_shutting_down: return []
+    
     pre_res = []; b_l, p_l = d.get("buy_limit", 0), d.get("profit_limit", 4000)
     ext, check_liq = d.get("extra", False), d.get("check_liq", False)
     i_list = list(items_data.keys()); cities = [f_c, t_c] if f_c and t_c else CITIES
     
     for i in range(0, len(i_list), 50):
+        if is_shutting_down: break
         url = f"https://europe.albion-online-data.com/api/v2/stats/prices/{','.join(i_list[i:i+50])}?locations={','.join(cities)}"
         data = None
         async with scan_semaphore:
             for attempt in range(3):
+                if is_shutting_down: break
                 try:
                     async with http_session.get(url, timeout=20) as resp:
                         if resp.status == 429: 
                             await asyncio.sleep(2 ** attempt)
                             continue
-                        if resp.status == 200: data = await resp.json(); break
+                        if resp.status == 200: 
+                            data = await resp.json()
+                            break
+                        else:
+                            logger.warning(f"API статус {resp.status} для батчу {i}")
                 except: await asyncio.sleep(1)
+            
         if not data: continue
         now = datetime.now(UTC)
         grouped = {}
@@ -151,16 +171,17 @@ async def scan_logic(d, f_c=None, t_c=None):
                         pre_res.append({'id':i_id,'q':int(q),'from':sc,'to':tc,'buy':buy,'sell':sell,'p_p':int(sell*0.935-buy),'p_n':p_n,'bd':c_d[sc]['sell_price_min_date'],'sd':c_d[tc].get(sk)})
         if i % 300 == 0: await asyncio.sleep(0.1)
 
-    if check_liq and pre_res:
+    if check_liq and pre_res and not is_shutting_down:
         pre_res.sort(key=lambda x: x['p_n'], reverse=True)
         res = []
         for item in pre_res[:30]:
+            if is_shutting_down: break
             vol = await get_item_liquidity(item['id'].split("@")[0], item['to'])
             if vol > 0: item['vol'] = vol; res.append(item)
         return res
     return pre_res
 
-# ================= КЛАВІАТУРИ ТА ОБРОБНИКИ =================
+# ================= КЛАВІАТУРИ ТА ХЕНДЛЕРИ =================
 def get_start_kb():
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❓ Допомога"), KeyboardButton(text="💰 Налаштувати бюджет")]], resize_keyboard=True)
 
@@ -212,7 +233,7 @@ async def disp_res(msg, res, show_vol):
     if full_text: messages.append(full_text)
     for t in messages: await msg.answer(t, parse_mode=ParseMode.HTML)
 
-# --- Допоміжні обробники ---
+# --- Допоміжні функції (Бюджет, Калькулятор, Допомога) ---
 @dp.message(F.text == "❓ Допомога", StateFilter('*'))
 @dp.message(Command("help"), StateFilter('*'))
 async def cmd_help(m, state: FSMContext):
@@ -290,12 +311,12 @@ async def cancel_res(cb): await cb.message.delete()
 @dp.message(Command("start"), StateFilter('*'))
 async def cmd_start(m, state: FSMContext): await state.clear(); await m.answer("👋 Бот готовий!", reply_markup=get_start_kb())
 
-# --- Shutdown & Main ---
+# --- Фінальний Shutdown та Main ---
 async def shutdown():
     global is_shutting_down, http_session
     if is_shutting_down: return
     is_shutting_down = True
-    logger.info("Вимкнення бота та звільнення ресурсів...")
+    logger.info("Вимкнення ресурсоємних процесів...")
     
     for t in background_tasks:
         if not t.done(): t.cancel()
@@ -303,19 +324,21 @@ async def shutdown():
     try:
         await asyncio.wait_for(asyncio.gather(*background_tasks, return_exceptions=True), timeout=5)
     except asyncio.TimeoutError:
-        logger.warning("Деякі задачі не встигли завершитися вчасно")
+        logger.warning("Деякі задачі не зупинилися вчасно.")
     
     if http_session and not http_session.closed:
         await http_session.close()
         http_session = None
-        logger.info("HTTP сесію закрито")
+        logger.info("HTTP сесію закрито.")
     
-    await bot.session.close()
-    logger.info("Бот повністю зупинений.")
+    try:
+        await bot.close()
+        logger.info("З'єднання з Telegram закрите.")
+    except:
+        logger.exception("Помилка при закритті бота.")
 
 def signal_handler(loop):
-    def handler():
-        asyncio.create_task(shutdown())
+    def handler(): asyncio.create_task(shutdown())
     return handler
 
 async def main():
