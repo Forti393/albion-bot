@@ -9,22 +9,16 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
-# ================= ЛОГУВАННЯ =================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ================= КОНФІГУРАЦІЯ =================
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0")) 
 TOKEN = os.environ.get("BOT_TOKEN")
-
-if not TOKEN:
-    logger.error("🚨 BOT_TOKEN відсутній!")
-    exit(1)
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+if not TOKEN: exit(1)
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# Глобальні змінні
 items_data = {}; is_db_ready = False
 http_session: Optional[aiohttp.ClientSession] = None 
 scan_semaphore = asyncio.Semaphore(5) 
@@ -33,7 +27,6 @@ user_cooldowns = {}; active_scans = set(); history_cache = {}
 background_tasks: List[asyncio.Task] = []
 is_shutting_down = False
 
-# Константи
 CACHE_TTL = 3600 
 CITIES = ["Bridgewatch", "Martlock", "Lymhurst", "Thetford", "Fort Sterling", "Caerleon", "Brecilien", "Black Market"]
 CITY_EMOJIS = {"Lymhurst":"🟢","Martlock":"🔵","Caerleon":"⚫","Thetford":"🟣","Bridgewatch":"🟠","Fort Sterling":"⚪","Brecilien":"🌸","Black Market":"💀"}
@@ -46,7 +39,6 @@ class BotState(StatesGroup):
     picking_from = State(); picking_to = State()
     calc_count = State(); calc_buy = State(); calc_sell = State()
 
-# ================= СЛУЖБОВІ ФУНКЦІЇ =================
 async def safe_delete(msg):
     try: await msg.delete()
     except: pass
@@ -178,10 +170,8 @@ async def disp_res(msg, res, d):
         name = items_data.get(b_id, {}).get("LocalizedNames", {}).get("RU-RU", b_id)
         name = re.sub(r'\s*\([^)]*\)', '', name); name = html.escape(name.upper())
         for t in TRASH: name = name.replace(t, "")
-        
         tbd, tsd = fmt_t(r.get('bd')), fmt_t(r.get('sd'))
-        liq_line = f"          📦 {r.get('vol','?')} шт/д\n" if show_liq else ""
-
+        liq_line = f"          📦 <b>{r.get('vol','?')} шт/д</b>\n" if show_liq else ""
         item_block = (
             f"{idx}) {icon} <b>{name}</b> [{tier}.{enc}]\n"
             f"✨ {QUALITY_NAMES.get(r['q'], 'Обычное')}\n"
@@ -194,7 +184,6 @@ async def disp_res(msg, res, d):
             f"          💀 <b>{r['p_n']:,}</b>   |   {tsd}"
             f"</pre>\n\n"
         )
-        
         if len(full_text) + len(item_block) > 3900: messages.append(full_text); full_text = item_block
         else: full_text += item_block
     if full_text: messages.append(full_text)
@@ -208,7 +197,6 @@ def get_main_kb(d):
     liq_l = f"📊 Попит: {'ON' if d.get('check_liq') else 'OFF'}"
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🚀 Запустити сканер")], [KeyboardButton(text=m_l), KeyboardButton(text=e_l)], [KeyboardButton(text=liq_l), KeyboardButton(text="🧮 Калькулятор")], [KeyboardButton(text="💰 Бюджет"), KeyboardButton(text="🔄 Скинути")]], resize_keyboard=True)
 
-# --- ОБРОБНИКИ ---
 @dp.message(F.text == "🚀 Запустити сканер", StateFilter('*'))
 async def main_search(m, state: FSMContext):
     u_id = m.from_user.id; d = await state.get_data()
@@ -234,8 +222,8 @@ async def toggle_liq(m, state: FSMContext):
 @dp.message(F.text.contains("Допомога"), StateFilter('*'))
 @dp.message(Command("help"), StateFilter('*'))
 async def cmd_help(m, state: FSMContext):
-    help_text = "📖 <b>Допомога:</b>\n1. Налаштуй Бюджет.\n2. Обери Режим.\n3. Тисни Сканер.\n⚡ 30хв — свіжість цін.\n📊 Попит — активність на ринку."
-    await m.answer(help_text, parse_mode=ParseMode.HTML)
+    await state.set_state(None)
+    await m.answer("📖 <b>Допомога:</b>\n1. Налаштуй Бюджет.\n2. Обери Режим.\n3. Тисни Сканер.\n⚡ 30хв — свіжість цін.\n📊 Попит — активність на ринку.", parse_mode=ParseMode.HTML)
 
 @dp.message(F.text == "🗺 Режим", StateFilter('*'))
 async def choose_mode(m, state):
@@ -279,16 +267,17 @@ async def cancel_handler(m, state: FSMContext):
 
 @dp.message(StateFilter(BotState.waiting_for_buy_limit, BotState.waiting_for_profit_limit, BotState.calc_count, BotState.calc_buy, BotState.calc_sell))
 async def numeric_handler(m, state: FSMContext):
-    if m.text and m.text.startswith('/'): 
+    if not m.text or m.text.startswith('/'): 
         await state.set_state(None)
         return
     try:
         v = int(m.text.replace(" ","")); curr = await state.get_state()
-        if curr and "waiting_for_buy_limit" in str(curr): await state.update_data(buy_limit=v); await state.set_state(None); await m.answer(f"✅ Бюджет: {v:,}", reply_markup=get_main_kb(await state.get_data()))
-        elif curr and "waiting_for_profit_limit" in str(curr): await state.update_data(profit_limit=v); await state.set_state(None); await m.answer(f"✅ Профіт: {v:,}", reply_markup=get_main_kb(await state.get_data()))
-        elif curr and "calc_count" in str(curr): await state.update_data(c=v); await state.set_state(BotState.calc_buy); await m.answer("📥 Введи ціну КУПІВЛІ:")
-        elif curr and "calc_buy" in str(curr): await state.update_data(b=v); await state.set_state(BotState.calc_sell); await m.answer("📤 Введи ціну ПРОДАЖУ:")
-        elif curr and "calc_sell" in str(curr):
+        if not curr: return
+        if "waiting_for_buy_limit" in str(curr): await state.update_data(buy_limit=v); await state.set_state(None); await m.answer(f"✅ Бюджет: {v:,}", reply_markup=get_main_kb(await state.get_data()))
+        elif "waiting_for_profit_limit" in str(curr): await state.update_data(profit_limit=v); await state.set_state(None); await m.answer(f"✅ Профіт: {v:,}", reply_markup=get_main_kb(await state.get_data()))
+        elif "calc_count" in str(curr): await state.update_data(c=v); await state.set_state(BotState.calc_buy); await m.answer("📥 Введи ціну КУПІВЛІ:")
+        elif "calc_buy" in str(curr): await state.update_data(b=v); await state.set_state(BotState.calc_sell); await m.answer("📤 Введи ціну ПРОДАЖУ:")
+        elif "calc_sell" in str(curr):
             d = await state.get_data(); await state.set_state(None)
             p_p, p_n = int((v*0.935)-d['b'])*d['c'], int((v*0.895)-d['b'])*d['c']
             await m.answer(f"📊 Результат ({d['c']} шт):\n👑 Пр: <b>{p_p:,}</b>\n💀 Пр: <b>{p_n:,}</b>", reply_markup=get_main_kb(d), parse_mode=ParseMode.HTML)
@@ -331,3 +320,4 @@ async def main():
 if __name__ == "__main__":
     try: asyncio.run(main())
     except: pass
+
