@@ -12,20 +12,21 @@ from aiogram.fsm.storage.memory import MemoryStorage
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ================= НАЛАШТУВАННЯ =================
+# ================= НАЛАШТУВАННЯ ТА ЗАМКИ =================
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0")) 
-
 bot = Bot(token=os.environ.get("BOT_TOKEN"))
 dp = Dispatcher(storage=MemoryStorage())
-items_data = {}; is_db_ready = False
 
+items_data = {}; is_db_ready = False
 scan_semaphore = asyncio.Semaphore(3) 
+active_scans_lock = asyncio.Lock() # Захист від подвійних кліків (Race Condition)
 user_cooldowns = {}; active_scans = set() 
 
 CITIES = ["Bridgewatch", "Martlock", "Lymhurst", "Thetford", "Fort Sterling", "Caerleon", "Brecilien", "Black Market"]
 CITY_EMOJIS = {"Lymhurst":"🟢","Martlock":"🔵","Caerleon":"⚫","Thetford":"🟣","Bridgewatch":"🟠","Fort Sterling":"⚪","Brecilien":"🌸","Black Market":"💀"}
 QUALITY_NAMES = {1:"Обычное", 2:"Хорошее", 3:"Выдающееся", 4:"Отличное", 5:"Шедевр"}
 TRASH = ["Знаток ","Мастер ","Великий мастер ","Старейшина ","Ученик ","Новичок "]
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"} # Захист від блокування API
 
 class BotState(StatesGroup):
     waiting_for_buy_limit = State(); waiting_for_profit_limit = State()
@@ -37,18 +38,21 @@ async def cleanup_cooldowns():
     while True:
         await asyncio.sleep(600)
         try:
-            now = datetime.now()
+            now = datetime.now(UTC) # Використовуємо тільки UTC для консистентності
             expired = [uid for uid, dt in user_cooldowns.items() if (now - dt).total_seconds() > 3600]
             for uid in expired: del user_cooldowns[uid]
             if expired: logger.info(f"Очищено {len(expired)} старих кулдаунів")
-        except Exception as e: logger.error(f"Помилка cleanup: {e}")
+        except Exception: logger.exception("Критична помилка cleanup_cooldowns:")
 
 async def safe_delete(msg):
     try: await msg.delete()
     except Exception: pass
 
 async def set_bot_commands():
-    commands = [types.BotCommand(command="start", description="🚀 Перезапустити бота / Головне меню")]
+    commands = [
+        types.BotCommand(command="start", description="🚀 Головне меню"),
+        types.BotCommand(command="help", description="📖 Як користуватися ботом")
+    ]
     await bot.set_my_commands(commands)
 
 def get_item_icon(unique_name):
@@ -62,7 +66,6 @@ def get_item_icon(unique_name):
     if "mount" in un: return "🐴"
     return "📦"
 
-# ================= КЛАВІАТУРИ =================
 def get_start_kb(): 
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❓ Допомога"), KeyboardButton(text="💰 Налаштувати бюджет")]], resize_keyboard=True)
 
@@ -90,13 +93,13 @@ async def download_items():
     start_time = datetime.now()
     try:
         async with aiohttp.ClientSession() as s:
-            async with s.get("https://raw.githubusercontent.com/ao-data/ao-bin-dumps/master/formatted/items.json", timeout=60) as r:
+            async with s.get("https://raw.githubusercontent.com/ao-data/ao-bin-dumps/master/formatted/items.json", timeout=60, headers=HEADERS) as r:
                 if r.status == 200:
                     data = await r.json(content_type=None)
                     allowed = ["weapon","armor","plate","leather","cloth","bag","cape","potion","meal","mount","tool","shapeshifter","offhand"]
                     items_data = {i["UniqueName"]: i for i in data if i.get("UniqueName","").startswith(("T4_","T5_","T6_","T7_","T8_")) and any(x in i.get("UniqueName","").lower() for x in allowed)}
                     logger.info(f"✅ БД завантажена: {len(items_data)} шт. за {(datetime.now()-start_time).total_seconds():.2f}с")
-    except Exception as e: logger.error(f"Помилка БД: {e}")
+    except Exception: logger.exception("Помилка БД:")
     finally: is_db_ready = True
 
 def fmt_t(s):
@@ -108,63 +111,63 @@ def fmt_t(s):
     except: return "???"
 
 async def scan_logic(d, f_c=None, t_c=None):
+    if not items_data: return [] # Захист від порожньої бази
     res = []; b_l = d.get("buy_limit", 0); p_l = d.get("profit_limit", 4000); ext = d.get("extra", False)
     i_list = list(items_data.keys()); cities = [f_c, t_c] if f_c and t_c else CITIES
+    
     async with aiohttp.ClientSession() as s:
         for i in range(0, len(i_list), 50):
             url = f"https://europe.albion-online-data.com/api/v2/stats/prices/{','.join(i_list[i:i+50])}?locations={','.join(cities)}"
-            try:
-                async with s.get(url, timeout=20) as resp:
-                    if resp.status != 200:
-                        logger.warning(f"API статус {resp.status}")
-                        continue
-                    data = await resp.json()
-                    if not data: continue
-                now = datetime.now(UTC)
-                grouped = {}
-                for e in data:
-                    k = f"{e['item_id']}|{e['quality']}"; grouped.setdefault(k, {})[e['city']] = e
-                for k, c_d in grouped.items():
-                    i_id, q = k.split("|"); srcs = [f_c] if f_c else [c for c in c_d if c!="Black Market"]
-                    for sc in srcs:
-                        if sc not in c_d: continue
-                        buy = c_d[sc].get('sell_price_min', 0)
-                        if buy <= 500 or buy > b_l: continue
-                        b_dt = datetime.fromisoformat(c_d[sc]['sell_price_min_date'].split(".")[0].replace("Z","")).replace(tzinfo=UTC)
-                        if (now-b_dt).total_seconds()/60 > 180: continue
-                        targets = [t_c] if t_c else [c for c in c_d if c!=sc]
-                        for tc in targets:
-                            if tc not in c_d: continue
-                            sk = 'buy_price_max_date' if tc=="Black Market" else 'sell_price_min_date'
-                            sell = c_d[tc].get('buy_price_max' if tc=="Black Market" else 'sell_price_min', 0)
-                            if sell <= buy or (sell/buy) > 10: continue
-                            s_dt = datetime.fromisoformat(c_d[tc].get(sk).split(".")[0].replace("Z","")).replace(tzinfo=UTC)
-                            if (now-s_dt).total_seconds()/60 > 180: continue
-                            p_n = int(sell*0.895-buy)
-                            if p_n >= p_l:
-                                if ext and ((now-b_dt).total_seconds()/60 > 30 or (now-s_dt).total_seconds()/60 > 30): continue
-                                res.append({'id':i_id,'q':int(q),'from':sc,'to':tc,'buy':buy,'sell':sell,'p_p':int(sell*0.935-buy),'p_n':p_n,'bd':c_d[sc]['sell_price_min_date'],'sd':c_d[tc].get(sk)})
-                if i % 300 == 0: await asyncio.sleep(0.2)
-            except Exception as e:
-                logger.warning(f"Помилка API запиту: {e}")
-                continue
+            data = None
+            
+            # Retry logic (відновлення при помилках 429/500)
+            for attempt in range(3):
+                try:
+                    async with s.get(url, timeout=20, headers=HEADERS) as resp:
+                        if resp.status == 429: await asyncio.sleep(1); continue
+                        if resp.status != 200: logger.warning(f"API статус {resp.status}"); break
+                        data = await resp.json()
+                        break
+                except Exception: logger.exception("Мережева помилка API:"); await asyncio.sleep(1)
+                
+            if not data: continue
+            
+            now = datetime.now(UTC)
+            grouped = {}
+            for e in data:
+                k = f"{e['item_id']}|{e['quality']}"; grouped.setdefault(k, {})[e['city']] = e
+            for k, c_d in grouped.items():
+                i_id, q = k.split("|"); srcs = [f_c] if f_c else [c for c in c_d if c!="Black Market"]
+                for sc in srcs:
+                    if sc not in c_d: continue
+                    buy = c_d[sc].get('sell_price_min', 0)
+                    if buy <= 500 or buy > b_l: continue
+                    b_dt = datetime.fromisoformat(c_d[sc]['sell_price_min_date'].split(".")[0].replace("Z","")).replace(tzinfo=UTC)
+                    if (now-b_dt).total_seconds()/60 > 180: continue
+                    targets = [t_c] if t_c else [c for c in c_d if c!=sc]
+                    for tc in targets:
+                        if tc not in c_d: continue
+                        sk = 'buy_price_max_date' if tc=="Black Market" else 'sell_price_min_date'
+                        sell = c_d[tc].get('buy_price_max' if tc=="Black Market" else 'sell_price_min', 0)
+                        if sell <= buy or (sell/buy) > 10: continue
+                        s_dt = datetime.fromisoformat(c_d[tc].get(sk).split(".")[0].replace("Z","")).replace(tzinfo=UTC)
+                        if (now-s_dt).total_seconds()/60 > 180: continue
+                        p_n = int(sell*0.895-buy)
+                        if p_n >= p_l:
+                            if ext and ((now-b_dt).total_seconds()/60 > 30 or (now-s_dt).total_seconds()/60 > 30): continue
+                            res.append({'id':i_id,'q':int(q),'from':sc,'to':tc,'buy':buy,'sell':sell,'p_p':int(sell*0.935-buy),'p_n':p_n,'bd':c_d[sc]['sell_price_min_date'],'sd':c_d[tc].get(sk)})
+            if i % 300 == 0: await asyncio.sleep(0.2)
     return res
 # ================= ОБРОБНИКИ ПОДІЙ =================
 @dp.message(F.text == "🚀 Запустити сканер", StateFilter('*'))
 async def main_search(m, state: FSMContext):
-    u_id, now = m.from_user.id, datetime.now()
+    u_id, now = m.from_user.id, datetime.now(UTC)
     is_admin = (u_id == ADMIN_ID)
     d = await state.get_data()
     
-    if not is_admin:
-        if u_id in active_scans: return await m.answer("⚠️ Твій запит ще обробляється!")
-        if u_id in user_cooldowns and (now - user_cooldowns[u_id]).total_seconds() < 25:
-            return await m.answer(f"⏳ Зачекай {int(25-(now-user_cooldowns[u_id]).total_seconds())} сек.")
-
-    if not is_db_ready: return await m.answer("⏳ База ще вантажиться, зачекай пару секунд...")
+    if not is_db_ready or not items_data: return await m.answer("⏳ База ще вантажиться, зачекай пару секунд...")
     b = d.get("buy_limit", 0)
     if b <= 0: return await m.answer("💰 Встанови бюджет у меню!")
-    
     mode = d.get("mode")
     if not mode: return await m.answer("🗺️ Обери режим!", reply_markup=get_mode_inline())
 
@@ -176,8 +179,15 @@ async def main_search(m, state: FSMContext):
         if not res: await m.answer("📭 Нічого не знайдено.\nАбо ринок порожній під твої ліміти, або сервери Альбіону тимчасово не відповідають.", reply_markup=get_main_kb(d))
         else: await disp_res(m, res); await m.answer(f"✅ Угод: {len(res)}", reply_markup=get_main_kb(d))
     else:
+        # Надійний захист від подвійних кліків
+        async with active_scans_lock:
+            if u_id in active_scans: return await m.answer("⚠️ Твій попередній запит ще обробляється!")
+            if u_id in user_cooldowns and (now - user_cooldowns[u_id]).total_seconds() < 25:
+                return await m.answer(f"⏳ Зачекай {int(25-(now-user_cooldowns[u_id]).total_seconds())} сек.")
+            active_scans.add(u_id)
+            
         async with scan_semaphore:
-            active_scans.add(u_id); user_cooldowns[u_id] = now
+            user_cooldowns[u_id] = now
             try:
                 s_msg = await m.answer("🔍 Сканую Європу...", reply_markup=ReplyKeyboardRemove())
                 res = await scan_logic(d, d.get('f_c'), d.get('t_c'))
@@ -188,6 +198,7 @@ async def main_search(m, state: FSMContext):
                 active_scans.discard(u_id)
 
 @dp.message(F.text == "❓ Допомога", StateFilter('*'))
+@dp.message(Command("help"), StateFilter('*'))
 async def cmd_help(m, state: FSMContext):
     text = (
         "📖 <b>Як користуватися ботом:</b>\n\n"
@@ -230,14 +241,14 @@ async def set_limit_cb(cb, state: FSMContext):
         t = cb.data.split("_")[2]
         cancel_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❌ Скасувати")]], resize_keyboard=True)
         
-        # Без видалення старого меню, швидко відправляємо нове в чат
         if t == "buy":
             await state.set_state(BotState.waiting_for_buy_limit)
             await cb.message.answer("💰 Введи макс. ціну покупки (лише цифри):", reply_markup=cancel_kb)
         else:
             await state.set_state(BotState.waiting_for_profit_limit)
             await cb.message.answer("📈 Введи мін. чистий профіт:", reply_markup=cancel_kb)
-    except Exception as e: logger.error(f"Помилка в set_limit_cb: {e}")
+        await safe_delete(cb.message)
+    except Exception: logger.exception("Помилка в set_limit_cb:")
 
 @dp.message(F.text == "🧮 Калькулятор", StateFilter('*'))
 async def calc_start(m, state: FSMContext):
@@ -250,7 +261,9 @@ async def h_calc(m, state: FSMContext):
     if m.text == "❌ Скасувати": return
     try:
         v = int(m.text.replace(" ", "").replace(",", ""))
-        if v <= 0: return await m.answer("❌ Введи позитивне число (більше 0)!")
+        if v <= 0: 
+            await state.set_state(None)
+            return await m.answer("❌ Введи позитивне число (більше 0)! Спробуй ще раз з меню.")
         
         curr = await state.get_state()
         if "calc_count" in str(curr):
@@ -267,7 +280,9 @@ async def h_calc(m, state: FSMContext):
             p_prem, p_norm = int((v * 0.935) - buy) * cnt, int((v * 0.895) - buy) * cnt
             text = (f"📊 <b>Результат для {cnt} шт:</b>\n──────────────────\n👑 З Преміумом: <code>{p_prem:,}</code>\n💀 Без према: <code>{p_norm:,}</code>\n──────────────────")
             await m.answer(text, reply_markup=get_main_kb(d), parse_mode=ParseMode.HTML)
-    except: await m.answer("❌ Будь ласка, введи тільки число!")
+    except: 
+        await state.set_state(None)
+        await m.answer("❌ Будь ласка, введи тільки число! Запусти калькулятор наново.")
 
 @dp.message(F.text == "❌ Скасувати", StateFilter(BotState.waiting_for_buy_limit, BotState.waiting_for_profit_limit, BotState.calc_count, BotState.calc_buy, BotState.calc_sell))
 async def cancel_limit(m, state: FSMContext):
@@ -278,7 +293,9 @@ async def cancel_limit(m, state: FSMContext):
 async def h_limits(m, state: FSMContext):
     try:
         v = int(m.text.replace(" ","").replace(",",""))
-        if v <= 0: return await m.answer("❌ Число повинно бути більше 0!")
+        if v <= 0: 
+            await state.set_state(None)
+            return await m.answer("❌ Число повинно бути більше 0! Спробуй наново.")
         
         curr = await state.get_state()
         if "buy" in str(curr): await state.update_data(buy_limit=v)
@@ -288,7 +305,9 @@ async def h_limits(m, state: FSMContext):
         await m.answer(f"✅ Збережено: {v:,}", reply_markup=get_main_kb(d))
         if not d.get("mode"): await m.answer("🗺 Тепер обери режим пошуку:", reply_markup=get_mode_inline())
         else: await m.answer("🚀 Тисни <b>\"Запустити сканер\"</b>", parse_mode=ParseMode.HTML)
-    except: await m.answer("❌ Помилка! Введи тільки ціле число.")
+    except: 
+        await state.set_state(None)
+        await m.answer("❌ Помилка! Введи тільки ціле число. Спробуй наново.")
 
 @dp.callback_query(F.data.startswith("set_mode_"), StateFilter('*'))
 async def set_mode_cb(cb, state: FSMContext):
@@ -299,33 +318,31 @@ async def set_mode_cb(cb, state: FSMContext):
         d = await state.get_data()
         
         if m == "all":
+            await safe_delete(cb.message)
             await cb.message.answer("🌍 Режим: <b>Всі міста</b> встановлено!\n\n🚀 Тисни <b>\"Запустити сканер\"</b>", reply_markup=get_main_kb(d), parse_mode=ParseMode.HTML)
         else:
             await state.set_state(BotState.picking_from)
             await cb.message.edit_text("📍 Звідки веземо товар?", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{CITY_EMOJIS[c]} {c}", callback_data=f"city_{c}")] for c in CITIES if c!="Black Market"]))
-    except Exception as e: logger.error(f"Помилка в set_mode_cb: {e}")
+    except Exception: logger.exception("Помилка в set_mode_cb:")
 
 @dp.callback_query(StateFilter(BotState.picking_from), F.data.startswith("city_"))
 async def from_cb(cb, state: FSMContext):
     try:
         await cb.answer(); c = cb.data.split("_")[1]; await state.update_data(f_c=c); await state.set_state(BotState.picking_to)
         await cb.message.edit_text(f"✅ Звідки: {c}\n📍 Тепер обери куди (Пункт Б):", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{CITY_EMOJIS[ci]} {ci}", callback_data=f"city_{ci}")] for ci in CITIES if ci!=c and ci!="Black Market"]))
-    except Exception as e: logger.error(f"Помилка в from_cb: {e}")
+    except Exception: logger.exception("Помилка в from_cb:")
 
 @dp.callback_query(StateFilter(BotState.picking_to), F.data.startswith("city_"))
 async def to_cb(cb, state: FSMContext):
     try:
         await cb.answer(); t = cb.data.split("_")[1]; await state.update_data(t_c=t, mode="custom"); d = await state.get_data(); await state.set_state(None)
+        await safe_delete(cb.message)
         await cb.message.answer(f"🚀 Маршрут <b>{d['f_c']} ➔ {t}</b> встановлено!\n\n🚀 Тисни <b>\"Запустити сканер\"</b>", reply_markup=get_main_kb(d), parse_mode=ParseMode.HTML)
-    except Exception as e: logger.error(f"Помилка в to_cb: {e}")
+    except Exception: logger.exception("Помилка в to_cb:")
 
 @dp.message(F.text.in_(["⚡ Свіжі ціни (30хв)", "🚫 Вимкнути фільтр 30хв"]), StateFilter('*'))
 async def toggle_extra(m, state: FSMContext):
-    d = await state.get_data()
-    val = not d.get("extra", False)
-    await state.update_data(extra=val)
-    d = await state.get_data()
-    
+    d = await state.get_data(); val = not d.get("extra", False); await state.update_data(extra=val); d = await state.get_data()
     status_msg = "✅ Фільтр 30хв <b>увімкнутий</b> — показуватимуться тільки свіжі ціни (до 30 хв)." if val else "❌ Фільтр 30хв <b>відключений</b> — показуватимуться всі доступні угоди."
     await m.answer(status_msg, parse_mode=ParseMode.HTML, reply_markup=get_main_kb(d))
 
@@ -377,8 +394,11 @@ async def cancel_res(cb): await cb.answer(); await safe_delete(cb.message)
 async def cmd_start(m, state: FSMContext): await state.clear(); await m.answer("👋 Бот готовий!", reply_markup=get_start_kb())
 
 async def main():
-    if ADMIN_ID == 0:
-        logger.warning("⚠️ ADMIN_ID не встановлена! Функції адміна будуть недоступні.")
+    if not os.environ.get("BOT_TOKEN"):
+        logger.error("🚨 BOT_TOKEN не встановлено! Бот не може бути запущений.")
+        return
+        
+    if ADMIN_ID == 0: logger.warning("⚠️ ADMIN_ID не встановлена! Функції адміна будуть недоступні.")
         
     await set_bot_commands() 
     await bot.delete_webhook(drop_pending_updates=True)
