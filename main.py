@@ -1,23 +1,43 @@
-import os, asyncio, aiohttp, logging, re, html, random
+import os, json, aiohttp, asyncio, re, logging, time, signal, random, html
 from datetime import datetime, timezone
 from typing import List, Optional
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.enums import ParseMode, ChatAction
+from aiogram.filters import Command, StateFilter
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+
+# ================= ЛОГУВАННЯ =================
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # ================= КОНФІГУРАЦІЯ =================
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0")) 
 TOKEN = os.environ.get("BOT_TOKEN")
+
+if not TOKEN:
+    logger.error("🚨 BOT_TOKEN відсутній!")
+    exit(1)
+
+bot = Bot(token=TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
+
+# Глобальні змінні
+items_data = {}; is_db_ready = False
+http_session: Optional[aiohttp.ClientSession] = None 
+scan_semaphore = asyncio.Semaphore(5) 
+user_cooldowns = {}; active_scans = set(); history_cache = {}
+is_shutting_down = False
+
+# Константи
+CACHE_TTL = 3600 
 CITIES = ["Bridgewatch", "Martlock", "Lymhurst", "Thetford", "Fort Sterling", "Caerleon", "Brecilien", "Black Market"]
 CITY_EMOJIS = {"Lymhurst":"🟢","Martlock":"🔵","Caerleon":"⚫","Thetford":"🟣","Bridgewatch":"🟠","Fort Sterling":"⚪","Brecilien":"🌸","Black Market":"💀"}
 QUALITY_NAMES = {1:"Обычное", 2:"Хорошее", 3:"Выдающееся", 4:"Отличное", 5:"Шедевр"}
 TRASH = ["Знаток ","Мастер ","Великий мастер ","Старейшина ","Ученик ","Новичок "]
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-CACHE_TTL = 3600 
-
-items_data = {}; is_db_ready = False
-http_session: Optional[aiohttp.ClientSession] = None 
-scan_semaphore = asyncio.Semaphore(5) 
-history_cache = {}; user_cooldowns = {}
-is_shutting_down = False
 
 class BotState(StatesGroup):
     waiting_for_buy_limit = State(); waiting_for_profit_limit = State()
@@ -25,6 +45,10 @@ class BotState(StatesGroup):
     calc_count = State(); calc_buy = State(); calc_sell = State()
 
 # ================= СЛУЖБОВІ ФУНКЦІЇ =================
+async def safe_delete(msg):
+    try: await msg.delete()
+    except: pass
+
 def get_item_icon(unique_name):
     un = unique_name.lower()
     if any(x in un for x in ["hood", "cowl", "helmet", "cap"]): return "🪖"
@@ -71,6 +95,7 @@ async def download_items():
                 data = await r.json(content_type=None)
                 allowed = ["weapon","armor","plate","leather","cloth","bag","cape","potion","meal","mount","tool","offhand"]
                 items_data = {i["UniqueName"]: i for i in data if i.get("UniqueName","").startswith(("T4_","T5_","T6_","T7_","T8_")) and any(x in i.get("UniqueName","").lower() for x in allowed)}
+                logger.info(f"✅ БД завантажена: {len(items_data)} предметів.")
                 is_db_ready = True
     except: is_db_ready = True
 
@@ -80,7 +105,6 @@ async def scan_logic(d, f_c=None, t_c=None):
     pre_res = []; b_l, p_l = d.get("buy_limit", 0), d.get("profit_limit", 4000)
     ext, check_liq = d.get("extra", False), d.get("check_liq", False)
     i_list = list(items_data.keys()); cities = [f_c, t_c] if f_c and t_c else CITIES
-    
     for i in range(0, len(i_list), 50):
         if is_shutting_down: break
         url = f"https://europe.albion-online-data.com/api/v2/stats/prices/{','.join(i_list[i:i+50])}?locations={','.join(cities)}"
@@ -123,46 +147,20 @@ async def scan_logic(d, f_c=None, t_c=None):
 
     if check_liq and pre_res:
         pre_res.sort(key=lambda x: x['p_n'], reverse=True)
-        filtered_res = []
-        for item in pre_res[:30]: # Беремо топ 30 для перевірки ліквідності
+        res = []
+        for item in pre_res[:25]:
             vol = await get_item_liquidity(item['id'].split("@")[0], item['to'])
-            
-            # Логіка фільтрації попиту:
-            # 1. Якщо продажі є (vol > 0) - залишаємо
-            # 2. Якщо продажів 0 - перевіряємо на "адекватність" профіту (до 15%)
             profit_margin = item['p_n'] / item['buy']
-            if vol > 0:
+            # Фільтр: залишаємо якщо є продажі АБО якщо продажів 0, але профіт адекватний (<= 15%)
+            if vol > 0 or profit_margin <= 0.15:
                 item['vol'] = vol
-                filtered_res.append(item)
-            elif profit_margin <= 0.15: # Якщо продажів 0, але профіт не маніпулятивний (низький)
-                item['vol'] = 0
-                filtered_res.append(item)
-            # В іншому випадку (vol=0 і профіт > 15%) - відсіюємо
-        return filtered_res[:15]
-    
+                res.append(item)
+        return res[:15]
     return pre_res
-import asyncio, logging, re, html
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.enums import ParseMode, ChatAction
-from aiogram.filters import Command, StateFilter
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.storage.memory import MemoryStorage
-from config import *
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-bot = Bot(token=TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
-
-async def safe_delete(msg):
-    try: await msg.delete()
-    except: pass
-
 async def disp_res(msg, res, d):
     res.sort(key=lambda x: x['p_n'], reverse=True)
     show_liq = d.get("check_liq")
     messages, full_text = [], ""
-    
     for idx, r in enumerate(res[:15], 1):
         b_id = r['id'].split("@")[0]; icon = get_item_icon(b_id)
         enc = r['id'].split("@")[1] if "@" in r['id'] else "0"; tier = b_id.split('_')[0][1:]
@@ -172,7 +170,6 @@ async def disp_res(msg, res, d):
         
         tbd, tsd = fmt_t(r.get('bd')), fmt_t(r.get('sd'))
         liq_line = f"          📊 <b>{r.get('vol', 0)} шт/д</b>\n" if show_liq else ""
-        
         item_block = (
             f"{idx}) {icon} <b>{name}</b> [{tier}.{enc}]\n"
             f"✨ {QUALITY_NAMES.get(r['q'], 'Обычное')}\n"
@@ -184,10 +181,8 @@ async def disp_res(msg, res, d):
             f"          💀 Пр: <b>{r['p_n']:,}</b>"
             f"</pre>\n\n"
         )
-        if len(full_text) + len(item_block) > 3900: 
-            messages.append(full_text); full_text = item_block
+        if len(full_text) + len(item_block) > 3900: messages.append(full_text); full_text = item_block
         else: full_text += item_block
-        
     if full_text: messages.append(full_text)
     for t in messages: await msg.answer(t, parse_mode=ParseMode.HTML)
 
@@ -201,7 +196,7 @@ def get_main_kb(d):
 
 @dp.message(F.text == "🚀 Запустити сканер", StateFilter('*'))
 async def main_search(m, state: FSMContext):
-    d = await state.get_data()
+    u_id = m.from_user.id; d = await state.get_data()
     if not is_db_ready: return await m.answer("⏳ БД вантажиться...")
     if d.get("buy_limit", 0) <= 0: return await m.answer("⚠️ Встанови бюджет!")
     if not d.get("mode"): return await m.answer("🗺️ Обери режим!")
