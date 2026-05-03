@@ -144,6 +144,7 @@ async def scan_logic(d, f_c=None, t_c=None):
                         if ext and ((now-b_dt).total_seconds()/60 > 30 or (now-s_dt).total_seconds()/60 > 30): continue
                         pre_res.append({'id':i_id,'q':int(q),'from':sc,'to':tc,'buy':buy,'sell':sell,
                                         'p_p':int(sell*0.935-buy),'p_n':p_n,'bd':bd_str,'sd':sd_str})
+
     if check_liq and pre_res:
         pre_res.sort(key=lambda x: x['p_n'], reverse=True)
         res = []
@@ -167,23 +168,40 @@ async def disp_res(msg, res, d):
         for t in TRASH: name = name.replace(t, "")
         
         tbd, tsd = fmt_t(r.get('bd')), fmt_t(r.get('sd'))
-        liq_line = f"📊 <b>{r.get('vol', 0)} шт/д</b>\n" if show_liq else ""
         
-        # Вирівнювання прибутку по центру
+        # Форматування блоку Прибуток + Попит
+        p_p_str = f"{r['p_p']:,}"
+        p_n_str = f"{r['p_n']:,}"
+        vol_str = f"{r.get('vol', 0)}"
+        
+        if show_liq:
+            profit_block = (
+                f"Прибуток:           Попит:\n"
+                f"👑 {p_p_str:<17} 📊 {vol_str}\n"
+                f"💀 {p_n_str:<17} шт/д"
+            )
+        else:
+            profit_block = (
+                f"Прибуток:\n"
+                f"👑 {p_p_str}\n"
+                f"💀 {p_n_str}"
+            )
+
         item_block = (
             f"{idx}) {icon} <b>{name}</b> [{tier}.{enc}]\n"
             f"✨ {QUALITY_NAMES.get(r['q'], 'Обычное')}\n"
             f"📥 {CITY_EMOJIS[r['from']]} {r['buy']:,} | 🕒 {tbd}\n"
             f"📤 {CITY_EMOJIS[r['to']]} {r['sell']:,} | 🕒 {tsd}\n"
-            f"{liq_line}"
             f"<pre>"
-            f"      Прибуток:\n"
-            f"      👑 {r['p_p']:,}\n"
-            f"      💀 {r['p_n']:,}"
+            f"{profit_block}"
             f"</pre>\n\n"
         )
-        if len(full_text) + len(item_block) > 3900: messages.append(full_text); full_text = item_block
-        else: full_text += item_block
+        
+        if len(full_text) + len(item_block) > 3900: 
+            messages.append(full_text); full_text = item_block
+        else: 
+            full_text += item_block
+            
     if full_text: messages.append(full_text)
     for t in messages: await msg.answer(t, parse_mode=ParseMode.HTML)
 
