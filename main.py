@@ -1,4 +1,4 @@
-import os, json, aiohttp, asyncio, re, logging
+import os, json, aiohttp, asyncio, re, logging, time
 from datetime import datetime, UTC, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode
@@ -19,14 +19,14 @@ dp = Dispatcher(storage=MemoryStorage())
 
 items_data = {}; is_db_ready = False
 scan_semaphore = asyncio.Semaphore(3) 
-active_scans_lock = asyncio.Lock() # Захист від подвійних кліків (Race Condition)
+active_scans_lock = asyncio.Lock() 
 user_cooldowns = {}; active_scans = set() 
 
 CITIES = ["Bridgewatch", "Martlock", "Lymhurst", "Thetford", "Fort Sterling", "Caerleon", "Brecilien", "Black Market"]
 CITY_EMOJIS = {"Lymhurst":"🟢","Martlock":"🔵","Caerleon":"⚫","Thetford":"🟣","Bridgewatch":"🟠","Fort Sterling":"⚪","Brecilien":"🌸","Black Market":"💀"}
 QUALITY_NAMES = {1:"Обычное", 2:"Хорошее", 3:"Выдающееся", 4:"Отличное", 5:"Шедевр"}
 TRASH = ["Знаток ","Мастер ","Великий мастер ","Старейшина ","Ученик ","Новичок "]
-HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"} # Захист від блокування API
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 class BotState(StatesGroup):
     waiting_for_buy_limit = State(); waiting_for_profit_limit = State()
@@ -38,7 +38,7 @@ async def cleanup_cooldowns():
     while True:
         await asyncio.sleep(600)
         try:
-            now = datetime.now(UTC) # Використовуємо тільки UTC для консистентності
+            now = datetime.now(UTC) 
             expired = [uid for uid, dt in user_cooldowns.items() if (now - dt).total_seconds() > 3600]
             for uid in expired: del user_cooldowns[uid]
             if expired: logger.info(f"Очищено {len(expired)} старих кулдаунів")
@@ -69,10 +69,10 @@ def get_item_icon(unique_name):
 def get_start_kb(): 
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❓ Допомога"), KeyboardButton(text="💰 Налаштувати бюджет")]], resize_keyboard=True)
 
+# ВИПРАВЛЕНО: Тепер основне меню показується ЗАВЖДИ
 def get_main_kb(d):
     m = d.get("mode")
-    if not m: return get_start_kb()
-    m_l = "🌍 Охоплення: Всі міста" if m == "all" else "📍 Маршрут: Шлях"
+    m_l = "🌍 Охоплення: Всі міста" if m == "all" else ("📍 Маршрут: Шлях" if m == "custom" else "🗺 Вибрати режим")
     e_l = "🚫 Вимкнути фільтр 30хв" if d.get("extra") else "⚡ Свіжі ціни (30хв)"
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="🚀 Запустити сканер")],
@@ -111,7 +111,7 @@ def fmt_t(s):
     except: return "???"
 
 async def scan_logic(d, f_c=None, t_c=None):
-    if not items_data: return [] # Захист від порожньої бази
+    if not items_data: return [] 
     res = []; b_l = d.get("buy_limit", 0); p_l = d.get("profit_limit", 4000); ext = d.get("extra", False)
     i_list = list(items_data.keys()); cities = [f_c, t_c] if f_c and t_c else CITIES
     
@@ -120,7 +120,6 @@ async def scan_logic(d, f_c=None, t_c=None):
             url = f"https://europe.albion-online-data.com/api/v2/stats/prices/{','.join(i_list[i:i+50])}?locations={','.join(cities)}"
             data = None
             
-            # Retry logic (відновлення при помилках 429/500)
             for attempt in range(3):
                 try:
                     async with s.get(url, timeout=20, headers=HEADERS) as resp:
@@ -179,7 +178,6 @@ async def main_search(m, state: FSMContext):
         if not res: await m.answer("📭 Нічого не знайдено.\nАбо ринок порожній під твої ліміти, або сервери Альбіону тимчасово не відповідають.", reply_markup=get_main_kb(d))
         else: await disp_res(m, res); await m.answer(f"✅ Угод: {len(res)}", reply_markup=get_main_kb(d))
     else:
-        # Надійний захист від подвійних кліків
         async with active_scans_lock:
             if u_id in active_scans: return await m.answer("⚠️ Твій попередній запит ще обробляється!")
             if u_id in user_cooldowns and (now - user_cooldowns[u_id]).total_seconds() < 25:
@@ -212,7 +210,8 @@ async def cmd_help(m, state: FSMContext):
     d = await state.get_data()
     await m.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_main_kb(d))
 
-@dp.message(F.text.in_(["🌍 Охоплення: Всі міста", "📍 Маршрут: Шлях"]), StateFilter('*'))
+# ВИПРАВЛЕНО: Додано "🗺 Вибрати режим" до тригерів
+@dp.message(F.text.in_(["🌍 Охоплення: Всі міста", "📍 Маршрут: Шлях", "🗺 Вибрати режим"]), StateFilter('*'))
 async def toggle_mode_menu(m, state: FSMContext):
     d = await state.get_data()
     current_mode = d.get("mode")
@@ -256,9 +255,11 @@ async def calc_start(m, state: FSMContext):
     cancel_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❌ Скасувати")]], resize_keyboard=True)
     await m.answer("📦 Введи кількість предметів:", reply_markup=cancel_kb)
 
+# ВИПРАВЛЕНО: Додано логування time.monotonic() для діагностики затримок
 @dp.message(StateFilter(BotState.calc_count, BotState.calc_buy, BotState.calc_sell))
 async def h_calc(m, state: FSMContext):
     if m.text == "❌ Скасувати": return
+    t0 = time.monotonic() 
     try:
         v = int(m.text.replace(" ", "").replace(",", ""))
         if v <= 0: 
@@ -283,6 +284,8 @@ async def h_calc(m, state: FSMContext):
     except: 
         await state.set_state(None)
         await m.answer("❌ Будь ласка, введи тільки число! Запусти калькулятор наново.")
+    finally:
+        logger.info(f"Обробка калькулятора (h_calc) зайняла {time.monotonic()-t0:.3f}с для {m.from_user.id}")
 
 @dp.message(F.text == "❌ Скасувати", StateFilter(BotState.waiting_for_buy_limit, BotState.waiting_for_profit_limit, BotState.calc_count, BotState.calc_buy, BotState.calc_sell))
 async def cancel_limit(m, state: FSMContext):
@@ -303,8 +306,6 @@ async def h_limits(m, state: FSMContext):
         
         d = await state.get_data(); await state.set_state(None)
         await m.answer(f"✅ Збережено: {v:,}", reply_markup=get_main_kb(d))
-        if not d.get("mode"): await m.answer("🗺 Тепер обери режим пошуку:", reply_markup=get_mode_inline())
-        else: await m.answer("🚀 Тисни <b>\"Запустити сканер\"</b>", parse_mode=ParseMode.HTML)
     except: 
         await state.set_state(None)
         await m.answer("❌ Помилка! Введи тільки ціле число. Спробуй наново.")
@@ -391,7 +392,7 @@ async def conf_res(cb, state: FSMContext):
 async def cancel_res(cb): await cb.answer(); await safe_delete(cb.message)
 
 @dp.message(Command("start"), StateFilter('*'))
-async def cmd_start(m, state: FSMContext): await state.clear(); await m.answer("👋 Бот готовий!", reply_markup=get_start_kb())
+async def cmd_start(m, state: FSMContext): await state.clear(); await m.answer("👋 Бот готовий!", reply_markup=get_main_kb(await state.get_data()))
 
 async def main():
     if not os.environ.get("BOT_TOKEN"):
@@ -407,3 +408,4 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__": asyncio.run(main())
+
