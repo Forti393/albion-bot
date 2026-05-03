@@ -152,10 +152,9 @@ async def main_search(m, state: FSMContext):
             await m.answer(f"✅ Готово! Знайдено: {len(res)}", reply_markup=get_main_kb(d))
             active_scans.remove(u_id)
 
-# --- Надійна настройка бюджету ---
 @dp.message(F.text == "💰 Налаштувати бюджет", StateFilter('*'))
 async def limit_menu(m, state: FSMContext):
-    await state.set_state(None) # Скидаємо будь-які завислі стани
+    await state.set_state(None)
     d = await state.get_data()
     b, p = d.get("buy_limit", 0), d.get("profit_limit", 4000)
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -166,13 +165,8 @@ async def limit_menu(m, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("set_limit_"), StateFilter('*'))
 async def set_limit_cb(cb, state: FSMContext):
-    await cb.answer()
-    t = cb.data.split("_")[2]
-    await cb.message.delete() # Видаляємо меню, щоб не було повторних кліків
-    
-    # Створюємо клавіатуру для скасування
+    await cb.answer(); t = cb.data.split("_")[2]; await cb.message.delete()
     cancel_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❌ Скасувати")]], resize_keyboard=True)
-    
     if t == "buy":
         await state.set_state(BotState.waiting_for_buy_limit)
         await cb.message.answer("💰 Введи макс. ціну покупки (лише цифри):", reply_markup=cancel_kb)
@@ -182,37 +176,28 @@ async def set_limit_cb(cb, state: FSMContext):
 
 @dp.message(F.text == "❌ Скасувати", StateFilter(BotState.waiting_for_buy_limit, BotState.waiting_for_profit_limit))
 async def cancel_limit(m, state: FSMContext):
-    d = await state.get_data()
-    await state.set_state(None)
+    d = await state.get_data(); await state.set_state(None)
     await m.answer("🚫 Введення скасовано.", reply_markup=get_main_kb(d))
 
 @dp.message(StateFilter(BotState.waiting_for_buy_limit, BotState.waiting_for_profit_limit))
 async def h_limits(m, state: FSMContext):
     try:
-        # Очищуємо текст від пробілів та ком, якщо юзер їх ввів
         v = int(m.text.replace(" ","").replace(",",""))
         curr = await state.get_state()
-        
         if "buy" in str(curr): await state.update_data(buy_limit=v)
         else: await state.update_data(profit_limit=v)
-        
-        d = await state.get_data()
-        await state.set_state(None) # ПРИМУСОВО виходимо зі стану
-        
+        d = await state.get_data(); await state.set_state(None)
         await m.answer(f"✅ Збережено: {v:,}", reply_markup=get_main_kb(d))
-        if not d.get("mode"):
-            await m.answer("🗺 Тепер обери режим пошуку:", reply_markup=get_mode_inline())
-        else:
-            await m.answer("🚀 Тисни <b>\"Запустити сканер\"</b>", parse_mode=ParseMode.HTML)
-    except:
-        await m.answer("❌ Помилка! Введи тільки ціле число (наприклад: 50000).")
+        if not d.get("mode"): await m.answer("🗺 Тепер обери режим пошуку:", reply_markup=get_mode_inline())
+        else: await m.answer("🚀 Тисни <b>\"Запустити сканер\"</b>", parse_mode=ParseMode.HTML)
+    except: await m.answer("❌ Помилка! Введи тільки ціле число.")
 
-# --- Решта обробників (Міста, Дизайн, Адмін) ---
 @dp.callback_query(F.data.startswith("set_mode_"), StateFilter('*'))
 async def set_mode_cb(cb, state: FSMContext):
     await cb.answer(); m = cb.data.split("_")[2]
     await state.update_data(mode=m); d = await state.get_data(); await cb.message.delete()
-    if m == "all": await cb.message.answer("🌍 Режим: <b>Всі міста</b> встановлено!", reply_markup=get_main_kb(d), parse_mode=ParseMode.HTML)
+    if m == "all": 
+        await cb.message.answer("🌍 Режим: <b>Всі міста</b> встановлено!\n\n🚀 Тисни <b>\"Запустити сканер\"</b>", reply_markup=get_main_kb(d), parse_mode=ParseMode.HTML)
     else:
         await state.set_state(BotState.picking_from)
         await cb.message.answer("📍 Звідки веземо товар?", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{CITY_EMOJIS[c]} {c}", callback_data=f"city_{c}")] for c in CITIES if c!="Black Market"]))
@@ -225,7 +210,7 @@ async def from_cb(cb, state: FSMContext):
 @dp.callback_query(StateFilter(BotState.picking_to), F.data.startswith("city_"))
 async def to_cb(cb, state: FSMContext):
     await cb.answer(); t = cb.data.split("_")[1]; await state.update_data(t_c=t, mode="custom"); d = await state.get_data(); await state.set_state(None); await cb.message.delete()
-    await cb.message.answer(f"🚀 Маршрут <b>{d['f_c']} ➔ {t}</b> встановлено!", reply_markup=get_main_kb(d), parse_mode=ParseMode.HTML)
+    await cb.message.answer(f"🚀 Маршрут <b>{d['f_c']} ➔ {t}</b> встановлено!\n\n🚀 Тисни <b>\"Запустити сканер\"</b>", reply_markup=get_main_kb(d), parse_mode=ParseMode.HTML)
 
 async def disp_res(msg, res):
     if not res: return
@@ -240,9 +225,9 @@ async def disp_res(msg, res):
                      f"✨ Качество: <b>{QUALITY_NAMES.get(r['q'], 'Обычное')}</b>\n"
                      f"──────────────────\n"
                      f"📥 <b>КУПІВЛЯ:</b> {CITY_EMOJIS[r['from']]} {r['from']}\n"
-                     f"💰 Цена: <code>{r['buy']:,}</code> (⏳ <b>{fmt_t(r['bd'])}</b>)\n\n"
+                     f"💰 Ціна: <code>{r['buy']:,}</code> (⏳ <b>{fmt_t(r['bd'])}</b>)\n\n"
                      f"📤 <b>ПРОДАЖ:</b> {CITY_EMOJIS[r['to']]} {r['to']}\n"
-                     f"💰 Цена: <code>{r['sell']:,}</code> (⏳ <b>{fmt_t(r['sd'])}</b>)\n"
+                     f"💰 Ціна: <code>{r['sell']:,}</code> (⏳ <b>{fmt_t(r['sd'])}</b>)\n"
                      f"──────────────────\n"
                      f"💵 <b>ПРИБУТОК:</b>\n"
                      f"👑 Преміум: <code>+{r['p_p']:,}</code>\n"
@@ -281,4 +266,3 @@ async def main():
     asyncio.create_task(download_items()); await dp.start_polling(bot)
 
 if __name__ == "__main__": asyncio.run(main())
-
