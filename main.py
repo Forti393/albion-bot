@@ -195,9 +195,9 @@ def get_main_kb(d):
     m_l = "🌍 Всі міста" if m == "all" else "📍 Шлях"
     e_l = f"⚡ 30хв: {'ON' if d.get('extra') else 'OFF'}"
     liq_l = f"📊 Попит: {'ON' if d.get('check_liq') else 'OFF'}"
-    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🚀 Запустити сканер")], [KeyboardButton(text=m_l), KeyboardButton(text=e_l)], [KeyboardButton(text=liq_l), KeyboardButton(text="🧮 Калькулятор")], [KeyboardButton(text="💰 Бюджет"), KeyboardButton(text="🔄 Скинути")]], resize_keyboard=True)
+    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🚀 Сканер")], [KeyboardButton(text=m_l), KeyboardButton(text=e_l)], [KeyboardButton(text=liq_l), KeyboardButton(text="🧮 Кальк")], [KeyboardButton(text="💰 Бюджет"), KeyboardButton(text="🔄 Скинути")]], resize_keyboard=True)
 
-@dp.message(F.text == "🚀 Запустити сканер", StateFilter('*'))
+@dp.message(F.text == "🚀 Сканер", StateFilter('*'))
 async def main_search(m, state: FSMContext):
     u_id = m.from_user.id; d = await state.get_data()
     if not is_db_ready: return await m.answer("⏳ БД вантажиться...")
@@ -255,7 +255,7 @@ async def set_limit_cb(cb, state: FSMContext):
     t = cb.data.split("_")[2]; await state.set_state(BotState.waiting_for_buy_limit if t=="buy" else BotState.waiting_for_profit_limit); await cb.answer()
     await cb.message.answer(f"Введи {'бюджет' if t=='buy' else 'мін. профіт'}:", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❌ Скасувати")]], resize_keyboard=True))
 
-@dp.message(F.text == "🧮 Калькулятор", StateFilter('*'))
+@dp.message(F.text == "🧮 Кальк", StateFilter('*'))
 async def calc_start(m, state: FSMContext):
     await state.set_state(BotState.calc_count)
     await m.answer("📦 Введи кількість предметів:", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❌ Скасувати")]], resize_keyboard=True))
@@ -320,4 +320,3 @@ async def main():
 if __name__ == "__main__":
     try: asyncio.run(main())
     except: pass
-
