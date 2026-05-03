@@ -29,7 +29,18 @@ class BotState(StatesGroup):
     picking_from = State()
     picking_to = State()
 
-# ================= КЛАВІАТУРИ =================
+# ================= ФУНКЦІЇ ВІЗУАЛУ =================
+def get_item_icon(unique_name):
+    un = unique_name.lower()
+    if any(x in un for x in ["hood", "cowl", "helmet"]): return "🪖"
+    if any(x in un for x in ["armor", "jacket", "robe"]): return "🧥"
+    if any(x in un for x in ["shoes", "boots"]): return "🥾"
+    if any(x in un for x in ["sword", "axe", "bow", "staff", "hammer", "mace", "dagger", "spear"]): return "⚔️"
+    if "bag" in un: return "🎒"
+    if "cape" in un: return "🧣"
+    if "mount" in un: return "🐴"
+    return "📦"
+
 def get_start_kb(): 
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❓ Допомога"), KeyboardButton(text="💰 Налаштувати бюджет")]], resize_keyboard=True)
 
@@ -108,28 +119,23 @@ async def scan_logic(d, f_c=None, t_c=None):
                 if i % 300 == 0: await asyncio.sleep(0.2)
             except: continue
     return res
-# ================= ОБРОБНИКИ ПОДІЙ =================
+# ================= ОБРОБНИКИ =================
 @dp.message(F.text == "🚀 Запустити сканер", StateFilter('*'))
 async def main_search(m, state: FSMContext):
     u_id, now = m.from_user.id, datetime.now()
     is_admin = (u_id == ADMIN_ID)
     d = await state.get_data()
-    
     if not is_admin:
-        if u_id in active_scans: return await m.answer("⚠️ Твій запит ще обробляється!")
+        if u_id in active_scans: return await m.answer("⚠️ Зачекай, твій запит ще обробляється!")
         if u_id in user_cooldowns and (now - user_cooldowns[u_id]).total_seconds() < 25:
             return await m.answer(f"⏳ Зачекай {int(25-(now-user_cooldowns[u_id]).total_seconds())} сек.")
 
     if not is_db_ready: return await m.answer("⏳ База вантажиться...")
-    
-    # ВИПРАВЛЕНО: Чітка перевірка бюджету
     b = d.get("buy_limit", 0)
-    if b <= 0:
-        return await m.answer("💰 Встанови бюджет у меню!")
+    if b <= 0: return await m.answer("💰 Встанови бюджет у меню!")
     
     mode = d.get("mode")
-    if not mode:
-        return await m.answer("🗺️ Обери режим!", reply_markup=get_mode_inline())
+    if not mode: return await m.answer("🗺️ Обери режим!", reply_markup=get_mode_inline())
 
     if is_admin:
         s_msg = await m.answer("⚡ <b>Адмін-сканування...</b>", parse_mode=ParseMode.HTML, reply_markup=ReplyKeyboardRemove())
@@ -138,7 +144,7 @@ async def main_search(m, state: FSMContext):
     else:
         async with scan_semaphore:
             active_scans.add(u_id); user_cooldowns[u_id] = now
-            s_msg = await m.answer("🔍 Сканую ринок Європи...", reply_markup=ReplyKeyboardRemove())
+            s_msg = await m.answer("🔍 Сканую Європу...", reply_markup=ReplyKeyboardRemove())
             res = await scan_logic(d, d.get('f_c'), d.get('t_c'))
             await s_msg.delete()
             if not res: await m.answer("📭 Нічого не знайдено.")
@@ -150,8 +156,7 @@ async def main_search(m, state: FSMContext):
 async def set_mode_cb(cb, state: FSMContext):
     await cb.answer(); m = cb.data.split("_")[2]
     await state.update_data(mode=m); d = await state.get_data(); await cb.message.delete()
-    if m == "all":
-        await cb.message.answer("🌍 Режим: <b>Всі міста</b> встановлено!\n\n👇 Тисни <b>\"Запустити сканер\"</b>", reply_markup=get_main_kb(d), parse_mode=ParseMode.HTML)
+    if m == "all": await cb.message.answer("🌍 Режим: <b>Всі міста</b> встановлено!\n\n👇 Тисни <b>\"Запустити сканер\"</b>", reply_markup=get_main_kb(d), parse_mode=ParseMode.HTML)
     else:
         await state.set_state(BotState.picking_from)
         await cb.message.answer("📍 Звідки веземо товар?", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"{CITY_EMOJIS[c]} {c}", callback_data=f"city_{c}")] for c in CITIES if c!="Black Market"]))
@@ -182,52 +187,43 @@ async def set_limit_cb(cb, state: FSMContext):
 @dp.message(StateFilter(BotState.waiting_for_buy_limit, BotState.waiting_for_profit_limit))
 async def h_limits(m, state: FSMContext):
     try:
-        v = int(m.text.replace(" ","").replace(",",""))
-        curr = await state.get_state()
-        
-        # ВИПРАВЛЕНО: Жорсткий запис у сесію
+        v = int(m.text.replace(" ","").replace(",","")); curr = await state.get_state()
         if "buy" in str(curr): await state.update_data(buy_limit=v)
         else: await state.update_data(profit_limit=v)
-        
         d = await state.get_data(); await state.set_state(None)
-        
-        if not d.get("mode"):
-            await m.answer(f"✅ Збережено: {v:,}\nТепер вибери режим:", reply_markup=get_mode_inline())
-        else:
-            await m.answer(f"✅ Збережено: {v:,}\n\n👇 Тисни <b>\"Запустити сканер\"</b>", reply_markup=get_main_kb(d), parse_mode=ParseMode.HTML)
+        if not d.get("mode"): await m.answer(f"✅ Збережено: {v:,}\nТепер вибери режим:", reply_markup=get_mode_inline())
+        else: await m.answer(f"✅ Збережено: {v:,}\n\n👇 Тисни <b>\"Запустити сканер\"</b>", reply_markup=get_main_kb(d), parse_mode=ParseMode.HTML)
     except: await m.answer("❌ Тільки цифри!")
 
 async def disp_res(msg, res):
     if not res: return
     res.sort(key=lambda x: x['p_n'], reverse=True)
-    full_text = ""
-    messages = []
+    full_text = ""; messages = []
     for idx, r in enumerate(res[:15], 1):
         b_id = r['id'].split("@")[0]; enc = r['id'].split("@")[1] if "@" in r['id'] else "0"
         name = items_data.get(b_id, {}).get("LocalizedNames", {}).get("RU-RU", b_id)
         for t in TRASH: name = name.replace(t, "")
-        item_text = (f"{idx}) 📦 <b>{name.upper()}</b> <code>[{b_id.split('_')[0][1:]}.{enc}]</code>\n"
+        icon = get_item_icon(b_id)
+        item_text = (f"{idx}) {icon} <b>{name.upper()}</b> <code>[{b_id.split('_')[0][1:]}.{enc}]</code>\n"
                      f"✨ Качество: <b>{QUALITY_NAMES.get(r['q'], 'Обычное')}</b>\n"
                      f"──────────────────\n"
                      f"📥 <b>КУПІВЛЯ:</b> {CITY_EMOJIS[r['from']]} {r['from']}\n"
-                     f"💰 Ціна: <code>{r['buy']:,}</code>\n"
-                     f"⏳ Оновлено: <b>{fmt_t(r['bd'])}</b> тому\n\n"
+                     f"💰 Цена: <code>{r['buy']:,}</code> (⏳ <b>{fmt_t(r['bd'])}</b>)\n\n"
                      f"📤 <b>ПРОДАЖ:</b> {CITY_EMOJIS[r['to']]} {r['to']}\n"
-                     f"💰 Ціна: <code>{r['sell']:,}</code>\n"
-                     f"⏳ Оновлено: <b>{fmt_t(r['sd'])}</b> тому\n"
+                     f"💰 Цена: <code>{r['sell']:,}</code> (⏳ <b>{fmt_t(r['sd'])}</b>)\n"
                      f"──────────────────\n"
-                     f"💵 <b>ПРИБУТОК:</b> 👑 <code>+{r['p_p']:,}</code> | 💀 <code>+{r['p_n']:,}</code>\n"
+                     f"💵 <b>ПРИБУТОК:</b>\n"
+                     f"👑 Преміум: <code>+{r['p_p']:,}</code>\n"
+                     f"💀 Без према: <code>+{r['p_n']:,}</code>\n"
                      f"──────────────────\n\n")
-        if len(full_text) + len(item_text) > 3900:
-            messages.append(full_text); full_text = item_text
+        if len(full_text) + len(item_text) > 3900: messages.append(full_text); full_text = item_text
         else: full_text += item_text
     if full_text: messages.append(full_text)
     for text in messages: await msg.answer(text, parse_mode=ParseMode.HTML)
 
 @dp.message(F.text == "🔄 Перезавантаження", StateFilter('*'))
 async def btn_res(m, state: FSMContext):
-    u_id = m.from_user.id
-    if u_id == ADMIN_ID:
+    if m.from_user.id == ADMIN_ID:
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📥 Оновити БД", callback_data="adm_upd")],[InlineKeyboardButton(text="✅ Скинути все", callback_data="conf_res"), InlineKeyboardButton(text="❌ Ні", callback_data="cancel_res")]])
         await m.answer("🛠 Адмін-панель:", reply_markup=kb)
     else:
@@ -236,13 +232,11 @@ async def btn_res(m, state: FSMContext):
 
 @dp.callback_query(F.data == "adm_upd")
 async def adm_upd(cb):
-    if cb.from_user.id == ADMIN_ID:
-        asyncio.create_task(download_items()); await cb.message.answer("✅ База оновлюється...")
+    if cb.from_user.id == ADMIN_ID: asyncio.create_task(download_items()); await cb.message.answer("✅ База оновлюється...")
     await cb.answer()
 
 @dp.callback_query(F.data == "conf_res")
-async def conf_res(cb, state: FSMContext): 
-    await state.clear(); await cb.answer(); await cb.message.delete(); await cb.message.answer("🔄 Все скинуто!", reply_markup=get_start_kb())
+async def conf_res(cb, state: FSMContext): await state.clear(); await cb.answer(); await cb.message.delete(); await cb.message.answer("🔄 Все скинуто!", reply_markup=get_start_kb())
 
 @dp.callback_query(F.data == "cancel_res")
 async def cancel_res(cb): await cb.answer(); await cb.message.delete()
@@ -255,3 +249,4 @@ async def main():
     asyncio.create_task(download_items()); await dp.start_polling(bot)
 
 if __name__ == "__main__": asyncio.run(main())
+
