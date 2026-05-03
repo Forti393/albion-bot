@@ -18,7 +18,7 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 TOKEN = os.environ.get("BOT_TOKEN")
 
 if not TOKEN:
-    logger.error("🚨 КРИТИЧНО: BOT_TOKEN відсутній у Railway Variables!")
+    logger.error("🚨 КРИТИЧНО: BOT_TOKEN відсутній!")
     exit(1)
 
 bot = Bot(token=TOKEN)
@@ -86,7 +86,6 @@ async def get_item_liquidity(item_id, city):
     if cache_key in history_cache and (now - history_cache[cache_key]['time']).total_seconds() < CACHE_TTL:
         return history_cache[cache_key]['data']
     
-    # Використовуємо інтервал 24 для отримання добових зрізів
     url = f"https://europe.albion-online-data.com/api/v2/stats/history/{item_id}?locations={city}&time-series=24"
     async with scan_semaphore:
         try:
@@ -94,12 +93,10 @@ async def get_item_liquidity(item_id, city):
                 if resp.status == 200:
                     data = await resp.json()
                     if data and data[0].get('data'):
-                        history_data = data[0]['data']
-                        vol = history_data[-1].get('item_count', 0)
-                        # Розрахунок середньої за 7 днів для стабільності
-                        recent_prices = [d['avg_price'] for d in history_data[-7:] if d['avg_price'] > 0]
-                        avg = int(sum(recent_prices) / len(recent_prices)) if recent_prices else 0
-                        
+                        h_d = data[0]['data']
+                        vol = h_d[-1].get('item_count', 0)
+                        prices = [d['avg_price'] for d in h_d[-7:] if d['avg_price'] > 0]
+                        avg = int(sum(prices) / len(prices)) if prices else 0
                         res = {"vol": vol, "avg": avg}
                         history_cache[cache_key] = {'data': res, 'time': now}
                         return res
@@ -167,12 +164,19 @@ async def scan_logic(d, f_c=None, t_c=None):
                         pre_res.append({'id':i_id,'q':int(q),'from':sc,'to':tc,'buy':buy,'sell':sell,
                                         'p_p':int(sell*0.935-buy),'p_n':p_n,'bd':bd_str,'sd':sd_str})
         if i % 300 == 0: await asyncio.sleep(0.1)
+    
     if check_liq and pre_res:
         pre_res.sort(key=lambda x: x['p_n'], reverse=True)
         res = []
-        for item in pre_res[:15]:
+        for item in pre_res[:20]:
             l_d = await get_item_liquidity(item['id'].split("@")[0], item['to'])
-            if l_d["vol"] > 0: 
+            # --- М'ЯКИЙ ФІЛЬТР ---
+            # Умова 1: Продано 4+ шт/д
+            # Умова 2: Продано хоча б 1 шт і ціна не завищена більше ніж у 2.5 рази від сер.7дн
+            is_active = l_d["vol"] >= 4
+            is_reliable = l_d["vol"] >= 1 and (item['sell'] <= l_d["avg"] * 2.5)
+            
+            if is_active or is_reliable:
                 item['vol'] = l_d["vol"]
                 item['avg_7'] = l_d["avg"]
                 res.append(item)
@@ -221,7 +225,6 @@ def get_main_kb(d):
     liq_l = f"📊 Попит: {'ON' if d.get('check_liq') else 'OFF'}"
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🚀 Сканер")], [KeyboardButton(text=m_l), KeyboardButton(text=e_l)], [KeyboardButton(text=liq_l), KeyboardButton(text="🧮 Кальк")], [KeyboardButton(text="💰 Бюджет"), KeyboardButton(text="🔄 Скинути")]], resize_keyboard=True)
 
-# --- ОБРОБНИКИ ---
 @dp.message(F.text == "🚀 Сканер", StateFilter('*'))
 async def main_search(m, state: FSMContext):
     u_id = m.from_user.id; d = await state.get_data()
