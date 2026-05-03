@@ -9,16 +9,22 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
+# ================= ЛОГУВАННЯ =================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# ================= КОНФІГУРАЦІЯ =================
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0")) 
 TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
-if not TOKEN: exit(1)
+
+if not TOKEN:
+    logger.error("🚨 КРИТИЧНО: BOT_TOKEN відсутній у Railway Variables!")
+    exit(1)
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
+# Глобальні змінні
 items_data = {}; is_db_ready = False
 http_session: Optional[aiohttp.ClientSession] = None 
 scan_semaphore = asyncio.Semaphore(5) 
@@ -27,6 +33,7 @@ user_cooldowns = {}; active_scans = set(); history_cache = {}
 background_tasks: List[asyncio.Task] = []
 is_shutting_down = False
 
+# Константи
 CACHE_TTL = 3600 
 CITIES = ["Bridgewatch", "Martlock", "Lymhurst", "Thetford", "Fort Sterling", "Caerleon", "Brecilien", "Black Market"]
 CITY_EMOJIS = {"Lymhurst":"🟢","Martlock":"🔵","Caerleon":"⚫","Thetford":"🟣","Bridgewatch":"🟠","Fort Sterling":"⚪","Brecilien":"🌸","Black Market":"💀"}
@@ -39,6 +46,7 @@ class BotState(StatesGroup):
     picking_from = State(); picking_to = State()
     calc_count = State(); calc_buy = State(); calc_sell = State()
 
+# ================= СЛУЖБОВІ ФУНКЦІЇ =================
 async def safe_delete(msg):
     try: await msg.delete()
     except: pass
@@ -78,15 +86,21 @@ async def get_item_liquidity(item_id, city):
     if cache_key in history_cache and (now - history_cache[cache_key]['time']).total_seconds() < CACHE_TTL:
         return history_cache[cache_key]['data']
     
-    url = f"https://europe.albion-online-data.com/api/v2/stats/history/{item_id}?locations={city}&time-series=1"
+    # Використовуємо інтервал 24 для отримання добових зрізів
+    url = f"https://europe.albion-online-data.com/api/v2/stats/history/{item_id}?locations={city}&time-series=24"
     async with scan_semaphore:
         try:
             async with http_session.get(url, timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     if data and data[0].get('data'):
-                        last_entry = data[0]['data'][-1]
-                        res = {"vol": last_entry.get('item_count', 0), "avg": int(last_entry.get('avg_price', 0))}
+                        history_data = data[0]['data']
+                        vol = history_data[-1].get('item_count', 0)
+                        # Розрахунок середньої за 7 днів для стабільності
+                        recent_prices = [d['avg_price'] for d in history_data[-7:] if d['avg_price'] > 0]
+                        avg = int(sum(recent_prices) / len(recent_prices)) if recent_prices else 0
+                        
+                        res = {"vol": vol, "avg": avg}
                         history_cache[cache_key] = {'data': res, 'time': now}
                         return res
         except: pass
@@ -103,7 +117,7 @@ async def download_items():
                 logger.info(f"✅ БД завантажена: {len(items_data)} предметів.")
                 is_db_ready = True
     except Exception as e:
-        logger.error(f"Помилка бази: {e}")
+        logger.error(f"Помилка завантаження бази: {e}")
         is_db_ready = True
 async def scan_logic(d, f_c=None, t_c=None):
     global http_session
@@ -157,10 +171,10 @@ async def scan_logic(d, f_c=None, t_c=None):
         pre_res.sort(key=lambda x: x['p_n'], reverse=True)
         res = []
         for item in pre_res[:15]:
-            liq_data = await get_item_liquidity(item['id'].split("@")[0], item['to'])
-            if liq_data["vol"] > 0: 
-                item['vol'] = liq_data["vol"]
-                item['avg_24'] = liq_data["avg"]
+            l_d = await get_item_liquidity(item['id'].split("@")[0], item['to'])
+            if l_d["vol"] > 0: 
+                item['vol'] = l_d["vol"]
+                item['avg_7'] = l_d["avg"]
                 res.append(item)
         return res
     return pre_res
@@ -175,13 +189,12 @@ async def disp_res(msg, res, d):
         name = items_data.get(b_id, {}).get("LocalizedNames", {}).get("RU-RU", b_id)
         name = re.sub(r'\s*\([^)]*\)', '', name); name = html.escape(name.upper())
         for t in TRASH: name = name.replace(t, "")
-        
         tbd, tsd = fmt_t(r.get('bd')), fmt_t(r.get('sd'))
         
         liq_part = ""
         if show_liq:
-            liq_part = (f"          📦 {r.get('vol','?')} шт/д\n"
-                        f"          📊 {r.get('avg_24', 0):,} ср.24г\n")
+            liq_part = (f"          📦 <b>{r.get('vol','?')} шт/д</b>\n"
+                        f"          📊 <b>{r.get('avg_7', 0):,} ср.7дн</b>\n")
 
         item_block = (
             f"{idx}) {icon} <b>{name}</b> [{tier}.{enc}]\n"
@@ -208,6 +221,7 @@ def get_main_kb(d):
     liq_l = f"📊 Попит: {'ON' if d.get('check_liq') else 'OFF'}"
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🚀 Сканер")], [KeyboardButton(text=m_l), KeyboardButton(text=e_l)], [KeyboardButton(text=liq_l), KeyboardButton(text="🧮 Кальк")], [KeyboardButton(text="💰 Бюджет"), KeyboardButton(text="🔄 Скинути")]], resize_keyboard=True)
 
+# --- ОБРОБНИКИ ---
 @dp.message(F.text == "🚀 Сканер", StateFilter('*'))
 async def main_search(m, state: FSMContext):
     u_id = m.from_user.id; d = await state.get_data()
@@ -234,7 +248,7 @@ async def toggle_liq(m, state: FSMContext):
 @dp.message(Command("help"), StateFilter('*'))
 async def cmd_help(m, state: FSMContext):
     await state.set_state(None)
-    await m.answer("📖 <b>Допомога:</b>\n1. Налаштуй Бюджет.\n2. Обери Режим.\n3. Тисни Сканер.\n⚡ 30хв — свіжість цін.\n📊 Попит — активність ринку та сер. ціна.", parse_mode=ParseMode.HTML)
+    await m.answer("📖 <b>Допомога:</b>\n1. Налаштуй Бюджет.\n2. Обери Режим.\n3. Тисни Сканер.\n⚡ 30хв — свіжість цін.\n📊 Попит — активність ринку (сер. за 7дн).", parse_mode=ParseMode.HTML)
 
 @dp.message(F.text == "🗺 Режим", StateFilter('*'))
 async def choose_mode(m, state):
@@ -300,7 +314,7 @@ async def btn_res(m, state: FSMContext): await state.clear(); await m.answer("�
 @dp.message(Command("start"), StateFilter('*'))
 async def cmd_start(m, state: FSMContext):
     await state.set_state(None); await state.clear()
-    await m.answer("🚀 <b>Albion Trader Bot</b> — твій сканер!", reply_markup=get_main_kb({}), parse_mode=ParseMode.HTML)
+    await m.answer("👋 Бот готовий!", reply_markup=get_main_kb({}))
 
 async def shutdown():
     global is_shutting_down, http_session
