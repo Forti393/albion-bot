@@ -66,19 +66,28 @@ def get_item_icon(unique_name):
     if "mount" in un: return "🐴"
     return "📦"
 
-def get_start_kb(): 
-    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❓ Допомога"), KeyboardButton(text="💰 Налаштувати бюджет")]], resize_keyboard=True)
+# ================= ОНОВЛЕНІ КЛАВІАТУРИ =================
+def get_start_kb():
+    return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="❓ Допомога"), KeyboardButton(text="💰 Налаштувати бюджет")]
+    ], resize_keyboard=True)
 
-# ВИПРАВЛЕНО: Тепер основне меню показується ЗАВЖДИ
 def get_main_kb(d):
     m = d.get("mode")
-    m_l = "🌍 Охоплення: Всі міста" if m == "all" else ("📍 Маршрут: Шлях" if m == "custom" else "🗺 Вибрати режим")
+    # Компактна версія, якщо режим не встановлено
+    if not m:
+        return ReplyKeyboardMarkup(keyboard=[
+            [KeyboardButton(text="❓ Допомога"), KeyboardButton(text="💰 Налаштувати бюджет")],
+            [KeyboardButton(text="🗺 Обрати режим")]
+        ], resize_keyboard=True)
+
+    m_l = "🌍 Охоплення: Всі міста" if m == "all" else "📍 Маршрут: Шлях"
     e_l = "🚫 Вимкнути фільтр 30хв" if d.get("extra") else "⚡ Свіжі ціни (30хв)"
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="🚀 Запустити сканер")],
         [KeyboardButton(text=m_l), KeyboardButton(text=e_l)],
         [KeyboardButton(text="🧮 Калькулятор"), KeyboardButton(text="💰 Налаштувати бюджет")],
-        [KeyboardButton(text="🔄 Перезавантаження")]
+        [KeyboardButton(text="🔄 Перезавантаження"), KeyboardButton(text="❓ Допомога")]
     ], resize_keyboard=True)
 
 def get_mode_inline(): 
@@ -210,8 +219,8 @@ async def cmd_help(m, state: FSMContext):
     d = await state.get_data()
     await m.answer(text, parse_mode=ParseMode.HTML, reply_markup=get_main_kb(d))
 
-# ВИПРАВЛЕНО: Додано "🗺 Вибрати режим" до тригерів
-@dp.message(F.text.in_(["🌍 Охоплення: Всі міста", "📍 Маршрут: Шлях", "🗺 Вибрати режим"]), StateFilter('*'))
+# ВИПРАВЛЕНО: Додано точний текст "🗺 Обрати режим"
+@dp.message(F.text.in_(["🌍 Охоплення: Всі міста", "📍 Маршрут: Шлях", "🗺 Обрати режим"]), StateFilter('*'))
 async def toggle_mode_menu(m, state: FSMContext):
     d = await state.get_data()
     current_mode = d.get("mode")
@@ -255,7 +264,6 @@ async def calc_start(m, state: FSMContext):
     cancel_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❌ Скасувати")]], resize_keyboard=True)
     await m.answer("📦 Введи кількість предметів:", reply_markup=cancel_kb)
 
-# ВИПРАВЛЕНО: Додано логування time.monotonic() для діагностики затримок
 @dp.message(StateFilter(BotState.calc_count, BotState.calc_buy, BotState.calc_sell))
 async def h_calc(m, state: FSMContext):
     if m.text == "❌ Скасувати": return
@@ -392,7 +400,7 @@ async def conf_res(cb, state: FSMContext):
 async def cancel_res(cb): await cb.answer(); await safe_delete(cb.message)
 
 @dp.message(Command("start"), StateFilter('*'))
-async def cmd_start(m, state: FSMContext): await state.clear(); await m.answer("👋 Бот готовий!", reply_markup=get_main_kb(await state.get_data()))
+async def cmd_start(m, state: FSMContext): await state.clear(); await m.answer("👋 Бот готовий!", reply_markup=get_start_kb())
 
 async def main():
     if not os.environ.get("BOT_TOKEN"):
@@ -408,4 +416,3 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__": asyncio.run(main())
-
