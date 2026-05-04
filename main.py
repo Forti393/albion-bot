@@ -82,14 +82,17 @@ async def get_item_liquidity(item_id, city, quality):
                     data = await resp.json()
                     if data and isinstance(data, list) and len(data) > 0:
                         history = data[0].get('data', [])
-                        # Шукаємо останній запис, де є дані
-                        for day in reversed(history):
-                            vol = day.get('item_count', 0)
-                            # Виправлено: перевіряємо обидва варіанти назви поля
-                            avg_p = day.get('avg_price') or day.get('average_price', 0)
-                            if vol > 0:
-                                history_cache[cache_key] = {'volume': vol, 'avg_p': int(avg_p), 'time': now}
-                                return vol, int(avg_p)
+                        
+                        # Розрахунок сумарного попиту (item_count)
+                        total_vol = sum(day.get('item_count', 0) for day in history)
+                        
+                        # Розрахунок медіанної ціни
+                        prices = [day.get('avg_price') or day.get('average_price', 0) for day in history if (day.get('avg_price') or day.get('average_price', 0)) > 0]
+                        prices.sort()
+                        median_p = prices[len(prices)//2] if prices else 0
+                        
+                        history_cache[cache_key] = {'volume': total_vol, 'avg_p': int(median_p), 'time': now}
+                        return total_vol, int(median_p)
         except Exception as e:
             logger.error(f"Помилка ліквідності {item_id}: {e}")
     
@@ -157,10 +160,9 @@ async def scan_logic(d, f_c=None, t_c=None):
                         if (now-s_dt).total_seconds()/60 > 180: continue
                     except: continue
 
-                    # Податки: Блек Маркет ~9% (якщо возити самому), звичайні міста ордерами ~10.5%
                     tax = 0.91 if is_bm else 0.895
                     p_n = int(sell * tax - buy)
-                    p_p = int(sell * (tax + 0.04) - buy) # Орієнтовний прибуток без податку на продаж
+                    p_p = int(sell * (tax + 0.04) - buy)
                     
                     if p_n >= p_l:
                         if ext and ((now-b_dt).total_seconds()/60 > 30 or (now-s_dt).total_seconds()/60 > 30): continue
@@ -172,8 +174,17 @@ async def scan_logic(d, f_c=None, t_c=None):
     
     for item in pre_res[:40]:
         vol, avg_p = await get_item_liquidity(item['id'], item['to'], item['q'])
+        
+        # Жорсткий фільтр попиту (якщо vol < 10 — пропускаємо)
+        if vol < 10: 
+            continue
+            
         item['vol'], item['avg_p'] = vol, avg_p
-        if check_liq_limit and vol < 4: continue
+        
+        # Фільтр "Попит Ліміт" (додатковий, якщо увімкнено в меню)
+        if check_liq_limit and vol < 20: # Наприклад, для ліміту ставимо ще вищу планку
+            continue
+            
         res_final.append(item)
         if len(res_final) >= 15: break
     return res_final
@@ -189,8 +200,8 @@ async def disp_res(msg, res, d):
         for t in TRASH: name = name.replace(t, "")
         
         tbd, tsd = fmt_t(r.get('bd')), fmt_t(r.get('sd'))
-        liq_part = f"Попит: {r.get('vol', 0)} шт/д"
-        avg_part = f"Сер. ціна: {r.get('avg_p', 0):,}"
+        liq_part = f"Попит: {r.get('vol', 0)} шт"
+        avg_part = f"Медіана: {r.get('avg_p', 0):,}"
         
         item_block = (
             f"{idx}) {icon} <b>{name}</b> [{tier}.{enc}]\n"
@@ -237,7 +248,7 @@ async def main_search(m, state: FSMContext):
     s_msg = await m.answer("🔍 Шукаю..."); res = await scan_logic(d, d.get('f_c'), d.get('t_c'))
     await safe_delete(s_msg)
     await state.update_data(has_searched=True); d['has_searched'] = True
-    if not res: await m.answer("📭 Порожньо. Спробуйте змінити фільтри.")
+    if not res: await m.answer("📭 Порожньо. Спробуйте змінити фільтри або зменшити ліміт попиту.")
     else: await disp_res(m, res, d)
     await m.answer("✅ Готово!", reply_markup=get_main_kb(d))
 
@@ -344,7 +355,7 @@ async def main():
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
     except TelegramUnauthorizedError:
-        logger.error("❌ Помилка: Токен бота невірний або відкликаний!")
+        logger.error("❌ Помилка: Токен бота невірний!")
     finally:
         await http_session.close()
         await bot.session.close()
