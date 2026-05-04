@@ -69,7 +69,7 @@ def fmt_t(s):
         return f"{m}м" if m < 60 else f"{m//60}г"
     except Exception: return "??"
 
-async def get_item_liquidity(item_id, city):
+async def get_item_liquidity(item_id, city, quality):
     global http_session, history_cache
     if not http_session or http_session.closed or is_shutting_down: return 0, 0
     
@@ -78,21 +78,29 @@ async def get_item_liquidity(item_id, city):
         sorted_keys = sorted(history_cache, key=lambda k: history_cache[k]['time'])
         for k in sorted_keys[:1000]: del history_cache[k]
 
-    cache_key, now = f"{item_id}|{city}", datetime.now(timezone.utc)
+    cache_key, now = f"{item_id}|{city}|{quality}", datetime.now(timezone.utc)
     if cache_key in history_cache and (now - history_cache[cache_key]['time']).total_seconds() < CACHE_TTL:
         return history_cache[cache_key]['volume'], history_cache[cache_key]['avg_p']
         
-    url = f"https://europe.albion-online-data.com/api/v2/stats/history/{item_id}?locations={city}&time-series=1"
+    url = f"https://europe.albion-online-data.com/api/v2/stats/history/{item_id}?locations={city}&time-series=1&qualities={quality}"
     async with scan_semaphore:
         try:
             async with http_session.get(url, timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    if data and data[0].get('data'):
-                        vol = data[0]['data'][-1].get('item_count', 0)
-                        avg_p = int(data[0]['data'][-1].get('average_price', 0))
-                        history_cache[cache_key] = {'volume': vol, 'avg_p': avg_p, 'time': now}
-                        return vol, avg_p
+                    if data and isinstance(data, list) and len(data) > 0:
+                        history = data[0].get('data', [])
+                        # Перебираємо історію з кінця, щоб знайти найсвіжіший день з реальними продажами
+                        for day in reversed(history):
+                            vol = day.get('item_count', 0)
+                            avg_p = day.get('average_price', 0)
+                            if vol > 0 and avg_p > 0:
+                                history_cache[cache_key] = {'volume': vol, 'avg_p': int(avg_p), 'time': now}
+                                return vol, int(avg_p)
+                        
+                        # Якщо цикл закінчився і не знайшов продажів
+                        history_cache[cache_key] = {'volume': 0, 'avg_p': 0, 'time': now}
+                        return 0, 0
         except asyncio.TimeoutError:
             pass
         except Exception as e:
@@ -192,7 +200,7 @@ async def scan_logic(d, f_c=None, t_c=None):
     
     # Завантажуємо історію завжди, бо хочемо виводити середню ціну та попит
     for item in pre_res[:40]: # Перевіряємо топ 40, щоб після ліміту залишилось 15
-        vol, avg_p = await get_item_liquidity(item['id'].split("@")[0], item['to'])
+        vol, avg_p = await get_item_liquidity(item['id'], item['to'], item['q'])
         item['vol'] = vol
         item['avg_p'] = avg_p
         
@@ -321,16 +329,23 @@ async def choose_mode(m, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("set_mode_"))
 async def set_mode_cb(cb, state: FSMContext):
-    m = cb.data.split("_")[2]; await state.update_data(mode=m); await cb.answer()
+    m = cb.data.split("_")[2]
     d = await state.get_data()
+    
     if m == "all": 
+        # Оновлюємо режим ТІЛЬКИ тут, бо дія успішна
+        await state.update_data(mode=m)
+        d['mode'] = m
         await cb.message.edit_text("🌍 Режим: Всі міста активовано!")
         await cb.message.answer("Режим змінено", reply_markup=get_main_kb(d))
+        await cb.answer()
     else: 
+        # Не зберігаємо mode="custom", поки не оберемо всі міста!
         await state.set_state(BotState.picking_from)
         await cb.message.edit_text("Звідки їдемо:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"{CITY_EMOJIS[c]} {c}", callback_data=f"city_{c}")] for c in CITIES if c!="Black Market"
         ]))
+        await cb.answer()
 
 @dp.callback_query(F.data.startswith("city_"))
 async def city_pick(cb, state: FSMContext):
@@ -349,8 +364,11 @@ async def city_pick(cb, state: FSMContext):
         ]))
         await cb.answer()
     elif curr == BotState.picking_to.state:
+        # Ось тут успішне завершення вибору! Зберігаємо режим!
         await state.update_data(t_c=c, mode="custom"); await state.set_state(None)
         d = await state.get_data()
+        d['mode'] = "custom"
+        d['t_c'] = c
         await cb.message.edit_text(f"📍 Шлях {d.get('f_c')} ➡️ {c} активовано!")
         await cb.message.answer("Шлях збережено", reply_markup=get_main_kb(d))
         await cb.answer()
