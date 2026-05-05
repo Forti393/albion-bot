@@ -82,15 +82,16 @@ async def get_item_liquidity(item_id, city, quality):
                     data = await resp.json()
                     if data and isinstance(data, list) and len(data) > 0:
                         history = data[0].get('data', [])
-                        
                         total_vol = 0
-                        total_price_volume = 0
+                        total_p_v = 0
                         
                         for day in history:
                             try:
-                                ts = datetime.fromisoformat(day['timestamp'].replace("Z", "+00:00"))
-                                # Тільки за останні 24 години
-                                if (now - ts).total_seconds() > 86400: continue
+                                # Отримуємо таймстемп
+                                ts_str = day['timestamp'].replace("Z", "+00:00")
+                                ts = datetime.fromisoformat(ts_str)
+                                # Збільшив до 36 годин для стабільності
+                                if (now - ts).total_seconds() > 129600: continue
                             except: continue
 
                             vol = day.get('item_count', 0)
@@ -98,10 +99,9 @@ async def get_item_liquidity(item_id, city, quality):
 
                             if vol > 0 and price > 0:
                                 total_vol += vol
-                                total_price_volume += (price * vol)
+                                total_p_v += (price * vol)
                         
-                        real_avg = int(total_price_volume / total_vol) if total_vol > 0 else 0
-                        
+                        real_avg = int(total_p_v / total_vol) if total_vol > 0 else 0
                         history_cache[cache_key] = {'volume': total_vol, 'avg_p': real_avg, 'time': now}
                         return total_vol, real_avg
         except Exception as e:
@@ -165,8 +165,7 @@ async def scan_logic(d, f_c=None, t_c=None):
                     sell = c_d[tc].get('buy_price_max' if is_bm else 'sell_price_min', 0)
                     
                     if sell <= buy: continue
-                    # Захист від нереальних націнок (фейк ціни)
-                    if sell / buy > 5: continue
+                    if sell / buy > 5: continue # Захист від фейків
                     
                     try:
                         sk = 'buy_price_max_date' if is_bm else 'sell_price_min_date'
@@ -183,26 +182,25 @@ async def scan_logic(d, f_c=None, t_c=None):
                         pre_res.append({'id':i_id,'q':int(q),'from':sc,'to':tc,'buy':buy,'sell':sell,
                                         'p_p':p_p,'p_n':p_n,'bd':c_d[sc]['sell_price_min_date'],'sd':c_d[tc][sk]})
 
-    # Отримуємо ліквідність та рахуємо Flip Score
     processed_res = []
-    for item in pre_res:
+    # Беремо перші 60 потенційних, щоб знайти найкращі за Score
+    for item in pre_res[:60]:
         vol, avg_p = await get_item_liquidity(item['id'], item['to'], item['q'])
         
-        # Динамічний ліміт попиту
-        min_vol = 2 if item['buy'] > 100000 else 8
-        if vol < min_vol: continue
-        if check_liq_limit and vol < (min_vol * 2): continue # Посилений фільтр
+        # Динамічний ліміт: знизив планку, щоб бот хоч щось видавав
+        min_vol = 1 if item['buy'] > 200000 else 5
+        
+        # Якщо включено фільтр ліквідності в меню, подвоюємо вимоги
+        actual_min = min_vol * 2 if check_liq_limit else min_vol
+        
+        if vol < actual_min: continue
             
         item['vol'], item['avg_p'] = vol, avg_p
-        
-        # 🔥 Flip Score (імба логіка)
+        # Flip Score
         item['score'] = int((item['p_n'] * vol) / max(item['buy'], 1))
         processed_res.append(item)
-        
-        # Щоб не сканувати тисячі товарів в історію, обмежуємо
-        if len(processed_res) >= 50: break
+        if len(processed_res) >= 20: break
 
-    # Сортування за Flip Score
     processed_res.sort(key=lambda x: x.get('score', 0), reverse=True)
     return processed_res[:15]
 
@@ -218,11 +216,10 @@ async def disp_res(msg, res, d):
         
         tbd, tsd = fmt_t(r.get('bd')), fmt_t(r.get('sd'))
         
-        # Маркування ліквідності
         liq = r.get('vol', 0)
-        if liq > 200: liq_label = "🔥"
-        elif liq > 50: liq_label = "⚡"
-        elif liq > 10: liq_label = "✅"
+        if liq > 150: liq_label = "🔥"
+        elif liq > 40: liq_label = "⚡"
+        elif liq > 5: liq_label = "✅"
         else: liq_label = "🐢"
         
         liq_part = f"{liq_label} {liq} шт/д"
@@ -274,7 +271,7 @@ async def main_search(m, state: FSMContext):
     s_msg = await m.answer("🔍 Шукаю..."); res = await scan_logic(d, d.get('f_c'), d.get('t_c'))
     await safe_delete(s_msg)
     await state.update_data(has_searched=True); d['has_searched'] = True
-    if not res: await m.answer("📭 Порожньо. Спробуйте змінити фільтри.")
+    if not res: await m.answer("📭 Порожньо. Спробуйте збільшити Бюджет або вимкнути Попит Ліміт.")
     else: await disp_res(m, res, d)
     await m.answer("✅ Готово!", reply_markup=get_main_kb(d))
 
@@ -363,8 +360,7 @@ async def numeric_handler(m, state: FSMContext):
 @dp.message(F.text.regexp(r"⚡ 30хв:|📊 Попит Ліміт:"), StateFilter('*'))
 async def toggles(m, state: FSMContext):
     d = await state.get_data()
-    if "⚡" in m.text: key = "extra"
-    else: key = "check_liq"
+    key = "extra" if "⚡" in m.text else "check_liq"
     val = not d.get(key, False); await state.update_data({key: val})
     await m.answer("Змінено", reply_markup=get_main_kb(await state.get_data()))
 
@@ -373,18 +369,15 @@ async def main():
     if not TOKEN: 
         logger.error("BOT_TOKEN відсутній!")
         return
-    
     http_session = aiohttp.ClientSession(headers=HEADERS)
     asyncio.create_task(download_items())
-    
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
-    except TelegramUnauthorizedError:
-        logger.error("❌ Помилка: Токен бота невірний!")
+    except: logger.error("Помилка бота!")
     finally:
-        if http_session: await http_session.close()
-        if bot: await bot.session.close()
+        await http_session.close()
+        await bot.session.close()
 
 if __name__ == "__main__":
     try: asyncio.run(main())
