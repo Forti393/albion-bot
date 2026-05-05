@@ -164,7 +164,6 @@ async def scan_logic(d, f_c=None, t_c=None):
     p_l = d.get("profit_limit", 4000)
     ext = d.get("extra", False)
     check_liq = d.get("check_liq", False)
-    # Збільшено до 720 хвилин (12 годин) для ширшого охоплення
     MAX_AGE_MINUTES = 720
 
     i_list = list(items_data.keys())
@@ -205,7 +204,6 @@ async def scan_logic(d, f_c=None, t_c=None):
                 if sc not in c_d:
                     continue
                 buy = c_d[sc].get('sell_price_min', 0)
-                # Фікс бюджету: перевіряємо тільки якщо бюджет > 0
                 if buy <= 500:
                     continue
                 if b_l > 0 and buy > b_l:
@@ -257,7 +255,8 @@ async def scan_logic(d, f_c=None, t_c=None):
 
     logger.info(f"Кандидатів після фільтрації цін: {len(pre_res)}")
     pre_res.sort(key=lambda x: x['p_n'], reverse=True)
-    candidates_for_liquidity = pre_res[:300]
+    # Зменшено до 150 для економії запитів
+    candidates_for_liquidity = pre_res[:150]
     enriched = []
 
     logger.info(f"Перед ліквідністю: {len(candidates_for_liquidity)} кандидатів")
@@ -265,12 +264,10 @@ async def scan_logic(d, f_c=None, t_c=None):
     for item in candidates_for_liquidity:
         vol, avg_p = await get_item_liquidity(item['id'], item['to'], item['q'])
 
-        # Антифейк тепер 4x замість 3x
         if avg_p > 0 and item['sell'] > (avg_p * 4):
             logger.info(f"Відкинуто {item['id']} як пастка: ціна продажу {item['sell']} > 4*сер.ціна {avg_p}")
             continue
 
-        # Розумна ліквідність
         if check_liq:
             min_vol = 2 if item['buy'] > 100000 else 5
             if vol < min_vol:
@@ -279,8 +276,8 @@ async def scan_logic(d, f_c=None, t_c=None):
 
         item['vol'] = vol
         item['avg_p'] = avg_p
-        # Новий score: прибуток * (1 + об'єм/20)
-        item['score'] = int(item['p_n'] * (1 + vol / 20))
+        # Оновлена формула score
+        item['score'] = int(item['p_n'] * (1 + min(vol, 100) / 25))
         enriched.append(item)
 
     logger.info(f"Після перевірки ліквідності: {len(enriched)}")
@@ -351,7 +348,7 @@ async def disp_res(msg: types.Message, res: list, d: dict):
 
     await msg.answer(f"📊 Усього знайдено <b>{len(res)}</b> позицій.", parse_mode=ParseMode.HTML)
 
-# ================= КНОПКИ ТА ОБРОБНИКИ (без змін) =================
+# ================= КНОПКИ ТА ОБРОБНИКИ =================
 def get_main_kb(d):
     mode = d.get("mode")
     budget = d.get("buy_limit", 0)
