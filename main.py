@@ -74,6 +74,7 @@ def fmt_t(s):
 async def get_item_liquidity(item_id, city, quality):
     global http_session, history_cache
     if not http_session or http_session.closed or is_shutting_down:
+        logger.warning(f"Ліквідність: сесія недоступна для {item_id}")
         return 0, 0
 
     cache_key = f"{item_id}|{city}|{quality}"
@@ -120,9 +121,17 @@ async def get_item_liquidity(item_id, city, quality):
                             res_vol, res_p = 0, 0
 
                         history_cache[cache_key] = {'volume': res_vol, 'avg_p': res_p, 'time': now}
+                        if res_vol > 0 or res_p > 0:
+                            logger.info(f"Ліквідність: {item_id} в {city} якість {quality} -> об'єм {res_vol}, сер.ціна {res_p}")
+                        else:
+                            logger.info(f"Ліквідність: {item_id} в {city} якість {quality} -> немає даних")
                         return res_vol, res_p
-        except Exception:
-            pass
+                else:
+                    logger.warning(f"Помилка отримання історії {item_id}: HTTP {resp.status}")
+        except asyncio.TimeoutError:
+            logger.warning(f"Таймаут історії {item_id}")
+        except Exception as e:
+            logger.error(f"Помилка історії {item_id}: {e}")
     return 0, 0
 
 async def download_items():
@@ -147,6 +156,7 @@ async def download_items():
         logger.error(f"Помилка завантаження предметів: {e}")
 async def scan_logic(d, f_c=None, t_c=None):
     if not items_data or not http_session or is_shutting_down:
+        logger.warning("Сканування неможливе: немає даних або сесії")
         return []
 
     pre_res = []
@@ -159,6 +169,8 @@ async def scan_logic(d, f_c=None, t_c=None):
     i_list = list(items_data.keys())
     cities = [f_c, t_c] if f_c and t_c else CITIES
 
+    logger.info(f"Сканування: бюджет {b_l}, профіт {p_l}, ext={ext}, check_liq={check_liq}")
+
     for i in range(0, len(i_list), 50):
         if is_shutting_down:
             break
@@ -170,7 +182,10 @@ async def scan_logic(d, f_c=None, t_c=None):
                 async with http_session.get(url, timeout=15) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-            except:
+                    else:
+                        logger.warning(f"Помилка цін з API, статус {resp.status}")
+            except Exception as e:
+                logger.error(f"Помилка запиту цін: {e}")
                 continue
 
         if not data:
@@ -190,10 +205,13 @@ async def scan_logic(d, f_c=None, t_c=None):
                     continue
                 buy = c_d[sc].get('sell_price_min', 0)
                 if buy <= 500 or buy > b_l:
+                    logger.debug(f"Відкинуто {i_id}: ціна купівлі {buy} (поза бюджетом)")
                     continue
                 try:
                     b_dt = datetime.fromisoformat(c_d[sc]['sell_price_min_date'].split(".")[0]).replace(tzinfo=timezone.utc)
-                    if (now - b_dt).total_seconds() / 60 > MAX_AGE_MINUTES:
+                    age_b = (now - b_dt).total_seconds() / 60
+                    if age_b > MAX_AGE_MINUTES:
+                        logger.debug(f"Відкинуто {i_id}: стара ціна купівлі ({age_b:.0f}хв)")
                         continue
                 except:
                     continue
@@ -209,7 +227,9 @@ async def scan_logic(d, f_c=None, t_c=None):
                     try:
                         sk = 'buy_price_max_date' if is_bm else 'sell_price_min_date'
                         s_dt = datetime.fromisoformat(c_d[tc][sk].split(".")[0]).replace(tzinfo=timezone.utc)
-                        if (now - s_dt).total_seconds() / 60 > MAX_AGE_MINUTES:
+                        age_s = (now - s_dt).total_seconds() / 60
+                        if age_s > MAX_AGE_MINUTES:
+                            logger.debug(f"Відкинуто {i_id}: стара ціна продажу ({age_s:.0f}хв)")
                             continue
                     except:
                         continue
@@ -219,7 +239,8 @@ async def scan_logic(d, f_c=None, t_c=None):
                     p_p = int(sell * (tax + 0.04) - buy)
 
                     if p_n >= p_l:
-                        if ext and ((now - b_dt).total_seconds() / 60 > 30 or (now - s_dt).total_seconds() / 60 > 30):
+                        if ext and (age_b > 30 or age_s > 30):
+                            logger.debug(f"Відкинуто {i_id} (ext): не свіжа пропозиція")
                             continue
                         pre_res.append({
                             'id': i_id,
@@ -234,21 +255,26 @@ async def scan_logic(d, f_c=None, t_c=None):
                             'sd': c_d[tc][sk]
                         })
 
+    logger.info(f"Кандидатів після фільтрації цін: {len(pre_res)}")
     pre_res.sort(key=lambda x: x['p_n'], reverse=True)
     candidates_for_liquidity = pre_res[:300]
     enriched = []
 
     for item in candidates_for_liquidity:
         vol, avg_p = await get_item_liquidity(item['id'], item['to'], item['q'])
+
         if avg_p > 0 and item['sell'] > (avg_p * 3):
+            logger.info(f"Відкинуто {item['id']} як пастка: ціна продажу {item['sell']} > 3*сер.ціна {avg_p}")
             continue
         if check_liq and vol < 10:
+            logger.debug(f"Відкинуто {item['id']} через низький об'єм ({vol})")
             continue
         item['vol'] = vol
         item['avg_p'] = avg_p
         item['score'] = int((item['p_n'] * max(vol, 1)) / max(item['buy'], 1))
         enriched.append(item)
 
+    logger.info(f"Після перевірки ліквідності: {len(enriched)}")
     dedup = {}
     for item in enriched:
         key = f"{item['id']}|{item['q']}"
@@ -256,6 +282,7 @@ async def scan_logic(d, f_c=None, t_c=None):
             dedup[key] = item
 
     final_list = sorted(dedup.values(), key=lambda x: x['score'], reverse=True)[:15]
+    logger.info(f"Фінальний список: {len(final_list)} унікальних предметів")
     return final_list
 
 async def disp_res(msg: types.Message, res: list, d: dict):
@@ -263,6 +290,7 @@ async def disp_res(msg: types.Message, res: list, d: dict):
         await msg.answer("📭 Нічого не знайдено. Спробуйте змінити фільтри.")
         return
 
+    # Показуємо кількість знайдених результатів ПЕРЕД списком
     await msg.answer(f"🔎 Знайдено <b>{len(res)}</b> результатів:", parse_mode=ParseMode.HTML)
 
     messages, full_text = [], ""
