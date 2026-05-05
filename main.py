@@ -205,13 +205,11 @@ async def scan_logic(d, f_c=None, t_c=None):
                     continue
                 buy = c_d[sc].get('sell_price_min', 0)
                 if buy <= 500 or buy > b_l:
-                    logger.debug(f"Відкинуто {i_id}: ціна купівлі {buy} (поза бюджетом)")
                     continue
                 try:
                     b_dt = datetime.fromisoformat(c_d[sc]['sell_price_min_date'].split(".")[0]).replace(tzinfo=timezone.utc)
                     age_b = (now - b_dt).total_seconds() / 60
                     if age_b > MAX_AGE_MINUTES:
-                        logger.debug(f"Відкинуто {i_id}: стара ціна купівлі ({age_b:.0f}хв)")
                         continue
                 except:
                     continue
@@ -229,7 +227,6 @@ async def scan_logic(d, f_c=None, t_c=None):
                         s_dt = datetime.fromisoformat(c_d[tc][sk].split(".")[0]).replace(tzinfo=timezone.utc)
                         age_s = (now - s_dt).total_seconds() / 60
                         if age_s > MAX_AGE_MINUTES:
-                            logger.debug(f"Відкинуто {i_id}: стара ціна продажу ({age_s:.0f}хв)")
                             continue
                     except:
                         continue
@@ -240,7 +237,6 @@ async def scan_logic(d, f_c=None, t_c=None):
 
                     if p_n >= p_l:
                         if ext and (age_b > 30 or age_s > 30):
-                            logger.debug(f"Відкинуто {i_id} (ext): не свіжа пропозиція")
                             continue
                         pre_res.append({
                             'id': i_id,
@@ -266,9 +262,12 @@ async def scan_logic(d, f_c=None, t_c=None):
         if avg_p > 0 and item['sell'] > (avg_p * 3):
             logger.info(f"Відкинуто {item['id']} як пастка: ціна продажу {item['sell']} > 3*сер.ціна {avg_p}")
             continue
-        if check_liq and vol < 10:
+
+        # ПОРОГ ОБСЯГУ ЗНИЖЕНО З 10 ДО 5 (тільки для check_liq)
+        if check_liq and vol < 5:
             logger.debug(f"Відкинуто {item['id']} через низький об'єм ({vol})")
             continue
+
         item['vol'] = vol
         item['avg_p'] = avg_p
         item['score'] = int((item['p_n'] * max(vol, 1)) / max(item['buy'], 1))
@@ -290,7 +289,7 @@ async def disp_res(msg: types.Message, res: list, d: dict):
         await msg.answer("📭 Нічого не знайдено. Спробуйте змінити фільтри.")
         return
 
-    # Показуємо кількість знайдених результатів ПЕРЕД списком
+    # Повідомлення спочатку
     await msg.answer(f"🔎 Знайдено <b>{len(res)}</b> результатів:", parse_mode=ParseMode.HTML)
 
     messages, full_text = [], ""
@@ -338,7 +337,10 @@ async def disp_res(msg: types.Message, res: list, d: dict):
     for t in messages:
         await msg.answer(t, parse_mode=ParseMode.HTML)
 
-# ================= КНОПКИ ТА ОБРОБНИКИ =================
+    # ДОДАНО: фінальний підсумок знизу
+    await msg.answer(f"📊 Усього знайдено <b>{len(res)}</b> позицій.", parse_mode=ParseMode.HTML)
+
+# ================= КНОПКИ ТА ОБРОБНИКИ (без змін) =================
 def get_main_kb(d):
     mode = d.get("mode")
     budget = d.get("buy_limit", 0)
