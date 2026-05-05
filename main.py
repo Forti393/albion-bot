@@ -1,5 +1,4 @@
-# ================= ЧАСТИНА 1 (початок) =================
-import os, json, aiohttp, asyncio, re, logging, time, signal, random, html
+import os, json, aiohttp, asyncio, re, logging, signal, html
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Dict
 from aiogram import Bot, Dispatcher, types, F
@@ -146,11 +145,7 @@ async def download_items():
                 logger.info(f"Базу предметів завантажено: {len(items_data)} позицій")
     except Exception as e:
         logger.error(f"Помилка завантаження предметів: {e}")
-
-# (продовження у частині 2)
-# ================= ЧАСТИНА 2 (логіка сканування, обробники, запуск) =================
 async def scan_logic(d, f_c=None, t_c=None):
-    """Основний сканер з покращеними фільтрами та дедублікацією."""
     if not items_data or not http_session or is_shutting_down:
         return []
 
@@ -159,7 +154,6 @@ async def scan_logic(d, f_c=None, t_c=None):
     p_l = d.get("profit_limit", 4000)
     ext = d.get("extra", False)
     check_liq = d.get("check_liq", False)
-    # Час життя даних – 6 годин замість 3
     MAX_AGE_MINUTES = 360
 
     i_list = list(items_data.keys())
@@ -176,7 +170,7 @@ async def scan_logic(d, f_c=None, t_c=None):
                 async with http_session.get(url, timeout=15) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-            except Exception as e:
+            except:
                 continue
 
         if not data:
@@ -190,7 +184,6 @@ async def scan_logic(d, f_c=None, t_c=None):
 
         for k, c_d in grouped.items():
             i_id, q = k.split("|")
-            # Джерела (місто купівлі)
             srcs = [f_c] if f_c else [c for c in c_d if c != "Black Market"]
             for sc in srcs:
                 if sc not in c_d:
@@ -198,7 +191,6 @@ async def scan_logic(d, f_c=None, t_c=None):
                 buy = c_d[sc].get('sell_price_min', 0)
                 if buy <= 500 or buy > b_l:
                     continue
-                # Перевірка свіжості ціни купівлі
                 try:
                     b_dt = datetime.fromisoformat(c_d[sc]['sell_price_min_date'].split(".")[0]).replace(tzinfo=timezone.utc)
                     if (now - b_dt).total_seconds() / 60 > MAX_AGE_MINUTES:
@@ -206,7 +198,6 @@ async def scan_logic(d, f_c=None, t_c=None):
                 except:
                     continue
 
-                # Цілі (місто продажу)
                 targets = [t_c] if t_c else [c for c in c_d if c != sc]
                 for tc in targets:
                     if tc not in c_d:
@@ -215,7 +206,6 @@ async def scan_logic(d, f_c=None, t_c=None):
                     sell = c_d[tc].get('buy_price_max' if is_bm else 'sell_price_min', 0)
                     if sell <= buy:
                         continue
-                    # Свіжість ціни продажу
                     try:
                         sk = 'buy_price_max_date' if is_bm else 'sell_price_min_date'
                         s_dt = datetime.fromisoformat(c_d[tc][sk].split(".")[0]).replace(tzinfo=timezone.utc)
@@ -226,10 +216,9 @@ async def scan_logic(d, f_c=None, t_c=None):
 
                     tax = 0.91 if is_bm else 0.895
                     p_n = int(sell * tax - buy)
-                    p_p = int(sell * (tax + 0.04) - buy)  # з преміумом
+                    p_p = int(sell * (tax + 0.04) - buy)
 
                     if p_n >= p_l:
-                        # Додатковий фільтр свіжості (ext) – тільки дуже свіжі пропозиції
                         if ext and ((now - b_dt).total_seconds() / 60 > 30 or (now - s_dt).total_seconds() / 60 > 30):
                             continue
                         pre_res.append({
@@ -245,45 +234,31 @@ async def scan_logic(d, f_c=None, t_c=None):
                             'sd': c_d[tc][sk]
                         })
 
-    # Сортування за чистим прибутком
     pre_res.sort(key=lambda x: x['p_n'], reverse=True)
-
-    # Відбираємо більше кандидатів для перевірки ліквідності (300)
     candidates_for_liquidity = pre_res[:300]
-
-    # Додаємо дані про обсяги та відкидаємо «пастки»
     enriched = []
+
     for item in candidates_for_liquidity:
         vol, avg_p = await get_item_liquidity(item['id'], item['to'], item['q'])
-
-        # Фільтр «пастки»: ціна продажу > 3 * середня історична (якщо є історія)
         if avg_p > 0 and item['sell'] > (avg_p * 3):
             continue
-
-        # Фільтр обсягу: при check_liq – мінімум 10, інакше беремо всі
         if check_liq and vol < 10:
             continue
-        # Якщо check_liq вимкнений, то дозволяємо навіть нульовий обсяг
-
         item['vol'] = vol
         item['avg_p'] = avg_p
-        # Рейтинг: прибуток * (1 + обсяг) / ціна купівлі
         item['score'] = int((item['p_n'] * max(vol, 1)) / max(item['buy'], 1))
         enriched.append(item)
 
-    # Дедублікація – залишаємо тільки один (найкращий) маршрут для кожного унікального предмета+якості
     dedup = {}
     for item in enriched:
         key = f"{item['id']}|{item['q']}"
         if key not in dedup or item['score'] > dedup[key]['score']:
             dedup[key] = item
 
-    # Фінальний список – топ-15 за рейтингом
     final_list = sorted(dedup.values(), key=lambda x: x['score'], reverse=True)[:15]
     return final_list
 
 async def disp_res(msg: types.Message, res: list, d: dict):
-    """Відправляє результати пошуку користувачу."""
     if not res:
         await msg.answer("📭 Нічого не знайдено. Спробуйте змінити фільтри.")
         return
@@ -508,19 +483,27 @@ async def toggles(m: types.Message, state: FSMContext):
 async def main():
     global http_session
     if not TOKEN:
-        logger.error("BOT_TOKEN не задано!")
+        logger.critical("BOT_TOKEN не задано! Зупиняюсь.")
         return
+
     http_session = aiohttp.ClientSession(headers=HEADERS)
     asyncio.create_task(download_items())
+
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
+    except TelegramUnauthorizedError:
+        logger.critical("❌ Токен бота недійсний або відкликаний. Перевірте BOT_TOKEN.")
+    except Exception as e:
+        logger.exception(f"Критична помилка під час запуску: {e}")
     finally:
-        await http_session.close()
-        await bot.session.close()
+        if http_session and not http_session.closed:
+            await http_session.close()
+        if bot and hasattr(bot, 'session') and bot.session:
+            await bot.session.close()
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        pass
+        logger.info("Бот зупинений вручну.")
