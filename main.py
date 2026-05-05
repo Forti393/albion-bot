@@ -1,5 +1,5 @@
 import os, json, aiohttp, asyncio, re, logging, time, signal, random, html
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import List, Optional
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode, ChatAction
@@ -82,28 +82,17 @@ async def get_item_liquidity(item_id, city, quality):
                     data = await resp.json()
                     if data and isinstance(data, list) and len(data) > 0:
                         history = data[0].get('data', [])
-                        total_vol = 0
-                        total_p_v = 0
                         
-                        for day in history:
-                            try:
-                                # Отримуємо таймстемп
-                                ts_str = day['timestamp'].replace("Z", "+00:00")
-                                ts = datetime.fromisoformat(ts_str)
-                                # Збільшив до 36 годин для стабільності
-                                if (now - ts).total_seconds() > 129600: continue
-                            except: continue
-
-                            vol = day.get('item_count', 0)
-                            price = day.get('avg_price') or day.get('average_price', 0)
-
-                            if vol > 0 and price > 0:
-                                total_vol += vol
-                                total_p_v += (price * vol)
+                        # Розрахунок сумарного попиту (item_count)
+                        total_vol = sum(day.get('item_count', 0) for day in history)
                         
-                        real_avg = int(total_p_v / total_vol) if total_vol > 0 else 0
-                        history_cache[cache_key] = {'volume': total_vol, 'avg_p': real_avg, 'time': now}
-                        return total_vol, real_avg
+                        # Розрахунок медіанної ціни
+                        prices = [day.get('avg_price') or day.get('average_price', 0) for day in history if (day.get('avg_price') or day.get('average_price', 0)) > 0]
+                        prices.sort()
+                        median_p = prices[len(prices)//2] if prices else 0
+                        
+                        history_cache[cache_key] = {'volume': total_vol, 'avg_p': int(median_p), 'time': now}
+                        return total_vol, int(median_p)
         except Exception as e:
             logger.error(f"Помилка ліквідності {item_id}: {e}")
     
@@ -163,9 +152,7 @@ async def scan_logic(d, f_c=None, t_c=None):
                     if tc not in c_d: continue
                     is_bm = (tc == "Black Market")
                     sell = c_d[tc].get('buy_price_max' if is_bm else 'sell_price_min', 0)
-                    
                     if sell <= buy: continue
-                    if sell / buy > 5: continue # Захист від фейків
                     
                     try:
                         sk = 'buy_price_max_date' if is_bm else 'sell_price_min_date'
@@ -182,27 +169,25 @@ async def scan_logic(d, f_c=None, t_c=None):
                         pre_res.append({'id':i_id,'q':int(q),'from':sc,'to':tc,'buy':buy,'sell':sell,
                                         'p_p':p_p,'p_n':p_n,'bd':c_d[sc]['sell_price_min_date'],'sd':c_d[tc][sk]})
 
-    processed_res = []
-    # Беремо перші 60 потенційних, щоб знайти найкращі за Score
-    for item in pre_res[:60]:
+    pre_res.sort(key=lambda x: x['p_n'], reverse=True)
+    res_final = []
+    
+    for item in pre_res[:40]:
         vol, avg_p = await get_item_liquidity(item['id'], item['to'], item['q'])
         
-        # Динамічний ліміт: знизив планку, щоб бот хоч щось видавав
-        min_vol = 1 if item['buy'] > 200000 else 5
-        
-        # Якщо включено фільтр ліквідності в меню, подвоюємо вимоги
-        actual_min = min_vol * 2 if check_liq_limit else min_vol
-        
-        if vol < actual_min: continue
+        # Жорсткий фільтр попиту (якщо vol < 10 — пропускаємо)
+        if vol < 10: 
+            continue
             
         item['vol'], item['avg_p'] = vol, avg_p
-        # Flip Score
-        item['score'] = int((item['p_n'] * vol) / max(item['buy'], 1))
-        processed_res.append(item)
-        if len(processed_res) >= 20: break
-
-    processed_res.sort(key=lambda x: x.get('score', 0), reverse=True)
-    return processed_res[:15]
+        
+        # Фільтр "Попит Ліміт" (додатковий, якщо увімкнено в меню)
+        if check_liq_limit and vol < 20: # Наприклад, для ліміту ставимо ще вищу планку
+            continue
+            
+        res_final.append(item)
+        if len(res_final) >= 15: break
+    return res_final
 
 async def disp_res(msg, res, d):
     messages, full_text = [], ""
@@ -215,20 +200,12 @@ async def disp_res(msg, res, d):
         for t in TRASH: name = name.replace(t, "")
         
         tbd, tsd = fmt_t(r.get('bd')), fmt_t(r.get('sd'))
-        
-        liq = r.get('vol', 0)
-        if liq > 150: liq_label = "🔥"
-        elif liq > 40: liq_label = "⚡"
-        elif liq > 5: liq_label = "✅"
-        else: liq_label = "🐢"
-        
-        liq_part = f"{liq_label} {liq} шт/д"
-        avg_part = f"Сер.ціна: {r.get('avg_p', 0):,}"
-        score_part = f"Flip: {r.get('score', 0)}"
+        liq_part = f"Попит: {r.get('vol', 0)} шт"
+        avg_part = f"Медіана: {r.get('avg_p', 0):,}"
         
         item_block = (
             f"{idx}) {icon} <b>{name}</b> [{tier}.{enc}]\n"
-            f"✨ {QUALITY_NAMES.get(r['q'], 'Обычное')} | 🏆 {score_part}\n"
+            f"✨ {QUALITY_NAMES.get(r['q'], 'Обычное')}\n"
             f"📥 {CITY_EMOJIS[r['from']]} {r['buy']:,} | 🕒 {tbd}\n"
             f"📤 {CITY_EMOJIS[r['to']]} {r['sell']:,} | 🕒 {tsd}\n"
             f"<pre>"
@@ -271,7 +248,7 @@ async def main_search(m, state: FSMContext):
     s_msg = await m.answer("🔍 Шукаю..."); res = await scan_logic(d, d.get('f_c'), d.get('t_c'))
     await safe_delete(s_msg)
     await state.update_data(has_searched=True); d['has_searched'] = True
-    if not res: await m.answer("📭 Порожньо. Спробуйте збільшити Бюджет або вимкнути Попит Ліміт.")
+    if not res: await m.answer("📭 Порожньо. Спробуйте змінити фільтри або зменшити ліміт попиту.")
     else: await disp_res(m, res, d)
     await m.answer("✅ Готово!", reply_markup=get_main_kb(d))
 
@@ -360,7 +337,8 @@ async def numeric_handler(m, state: FSMContext):
 @dp.message(F.text.regexp(r"⚡ 30хв:|📊 Попит Ліміт:"), StateFilter('*'))
 async def toggles(m, state: FSMContext):
     d = await state.get_data()
-    key = "extra" if "⚡" in m.text else "check_liq"
+    if "⚡" in m.text: key = "extra"
+    else: key = "check_liq"
     val = not d.get(key, False); await state.update_data({key: val})
     await m.answer("Змінено", reply_markup=get_main_kb(await state.get_data()))
 
@@ -369,12 +347,15 @@ async def main():
     if not TOKEN: 
         logger.error("BOT_TOKEN відсутній!")
         return
+    
     http_session = aiohttp.ClientSession(headers=HEADERS)
     asyncio.create_task(download_items())
+    
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
-    except: logger.error("Помилка бота!")
+    except TelegramUnauthorizedError:
+        logger.error("❌ Помилка: Токен бота невірний!")
     finally:
         await http_session.close()
         await bot.session.close()
