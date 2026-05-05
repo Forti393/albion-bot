@@ -164,7 +164,8 @@ async def scan_logic(d, f_c=None, t_c=None):
     p_l = d.get("profit_limit", 4000)
     ext = d.get("extra", False)
     check_liq = d.get("check_liq", False)
-    MAX_AGE_MINUTES = 360
+    # Збільшено до 720 хвилин (12 годин) для ширшого охоплення
+    MAX_AGE_MINUTES = 720
 
     i_list = list(items_data.keys())
     cities = [f_c, t_c] if f_c and t_c else CITIES
@@ -204,7 +205,10 @@ async def scan_logic(d, f_c=None, t_c=None):
                 if sc not in c_d:
                     continue
                 buy = c_d[sc].get('sell_price_min', 0)
-                if buy <= 500 or buy > b_l:
+                # Фікс бюджету: перевіряємо тільки якщо бюджет > 0
+                if buy <= 500:
+                    continue
+                if b_l > 0 and buy > b_l:
                     continue
                 try:
                     b_dt = datetime.fromisoformat(c_d[sc]['sell_price_min_date'].split(".")[0]).replace(tzinfo=timezone.utc)
@@ -256,21 +260,27 @@ async def scan_logic(d, f_c=None, t_c=None):
     candidates_for_liquidity = pre_res[:300]
     enriched = []
 
+    logger.info(f"Перед ліквідністю: {len(candidates_for_liquidity)} кандидатів")
+
     for item in candidates_for_liquidity:
         vol, avg_p = await get_item_liquidity(item['id'], item['to'], item['q'])
 
-        if avg_p > 0 and item['sell'] > (avg_p * 3):
-            logger.info(f"Відкинуто {item['id']} як пастка: ціна продажу {item['sell']} > 3*сер.ціна {avg_p}")
+        # Антифейк тепер 4x замість 3x
+        if avg_p > 0 and item['sell'] > (avg_p * 4):
+            logger.info(f"Відкинуто {item['id']} як пастка: ціна продажу {item['sell']} > 4*сер.ціна {avg_p}")
             continue
 
-        # ПОРОГ ОБСЯГУ ЗНИЖЕНО З 10 ДО 5 (тільки для check_liq)
-        if check_liq and vol < 5:
-            logger.debug(f"Відкинуто {item['id']} через низький об'єм ({vol})")
-            continue
+        # Розумна ліквідність
+        if check_liq:
+            min_vol = 2 if item['buy'] > 100000 else 5
+            if vol < min_vol:
+                logger.debug(f"Відкинуто {item['id']} через низький об'єм ({vol})")
+                continue
 
         item['vol'] = vol
         item['avg_p'] = avg_p
-        item['score'] = int((item['p_n'] * max(vol, 1)) / max(item['buy'], 1))
+        # Новий score: прибуток * (1 + об'єм/20)
+        item['score'] = int(item['p_n'] * (1 + vol / 20))
         enriched.append(item)
 
     logger.info(f"Після перевірки ліквідності: {len(enriched)}")
@@ -281,7 +291,10 @@ async def scan_logic(d, f_c=None, t_c=None):
             dedup[key] = item
 
     final_list = sorted(dedup.values(), key=lambda x: x['score'], reverse=True)[:15]
-    logger.info(f"Фінальний список: {len(final_list)} унікальних предметів")
+    if not final_list:
+        logger.warning("❌ Нічого не знайдено після всіх фільтрів")
+    else:
+        logger.info(f"Фінальний список: {len(final_list)} унікальних предметів")
     return final_list
 
 async def disp_res(msg: types.Message, res: list, d: dict):
@@ -289,7 +302,6 @@ async def disp_res(msg: types.Message, res: list, d: dict):
         await msg.answer("📭 Нічого не знайдено. Спробуйте змінити фільтри.")
         return
 
-    # Повідомлення спочатку
     await msg.answer(f"🔎 Знайдено <b>{len(res)}</b> результатів:", parse_mode=ParseMode.HTML)
 
     messages, full_text = [], ""
@@ -337,7 +349,6 @@ async def disp_res(msg: types.Message, res: list, d: dict):
     for t in messages:
         await msg.answer(t, parse_mode=ParseMode.HTML)
 
-    # ДОДАНО: фінальний підсумок знизу
     await msg.answer(f"📊 Усього знайдено <b>{len(res)}</b> позицій.", parse_mode=ParseMode.HTML)
 
 # ================= КНОПКИ ТА ОБРОБНИКИ (без змін) =================
