@@ -9,7 +9,11 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramUnauthorizedError
-from google import genai
+
+try:
+    from google import genai
+except ImportError:
+    genai = None
 
 # ================= КОНФІГУРАЦІЯ =================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -19,7 +23,18 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 TOKEN = os.environ.get("BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+# Ініціалізація Gemini з актуальною моделлю
+gemini_client = None
+if genai and GEMINI_API_KEY:
+    try:
+        gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+        # Перевіряємо доступність моделі (можна закоментовано, якщо довго)
+        # model_list = gemini_client.models.list()
+        # available = [m.name for m in model_list]
+        # logger.info(f"Доступні моделі: {available}")
+    except Exception as e:
+        logger.error(f"Помилка ініціалізації Gemini: {e}")
+        gemini_client = None
 
 bot = Bot(token=TOKEN) if TOKEN else None
 dp = Dispatcher(storage=MemoryStorage())
@@ -42,8 +57,7 @@ QUALITY_NAMES = {1:"Обычное", 2:"Хорошее", 3:"Выдающееся
 TRASH = ["Знаток ","Мастер ","Великий мастер ","Старейшина ","Ученик ","Новичок "]
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
-# Blacklist – предмети, які ігноруємо (книги, орби – майже завжди збиткові)
-BLACKLIST_KEYWORDS = ["OFF_BOOK", "OFF_ORB"]  # можна додати свої через змінну оточення BLACKLIST, роздільник «,»
+BLACKLIST_KEYWORDS = ["OFF_BOOK", "OFF_ORB"]
 
 class BotState(StatesGroup):
     waiting_for_buy_limit = State()
@@ -55,10 +69,9 @@ class BotState(StatesGroup):
     calc_sell = State()
     confirm_reset = State()
 
-# ================= СЛУЖБОВІ ФУНКЦІЇ =================
+# ================= СЛУЖБОВІ ФУНКЦІЇ (без змін) =================
 def is_blacklisted(unique_name):
     name = unique_name.upper()
-    # Додаємо ключові слова зі змінної оточення
     env_blacklist = os.environ.get("BLACKLIST", "")
     for w in env_blacklist.split(","):
         w = w.strip().upper()
@@ -70,10 +83,8 @@ def is_blacklisted(unique_name):
     return False
 
 async def safe_delete(msg):
-    try:
-        await msg.delete()
-    except Exception:
-        pass
+    try: await msg.delete()
+    except: pass
 
 def get_item_icon(unique_name):
     un = unique_name.lower()
@@ -92,8 +103,7 @@ def fmt_t(s):
         dt = datetime.fromisoformat(s.split(".")[0].replace("Z", "")).replace(tzinfo=timezone.utc)
         m = int((datetime.now(timezone.utc) - dt).total_seconds() / 60)
         return f"{m}м" if m < 60 else f"{m//60}г"
-    except Exception:
-        return "??"
+    except: return "??"
 
 async def get_item_liquidity(item_id, city, quality):
     global http_session, history_cache
@@ -121,8 +131,7 @@ async def get_item_liquidity(item_id, city, quality):
                             try:
                                 ts = datetime.fromisoformat(day['timestamp'].replace("Z", "+00:00"))
                                 is_recent = (now - ts).total_seconds() <= 86400
-                            except:
-                                is_recent = False
+                            except: is_recent = False
                             if is_recent:
                                 vol_24h += v
                                 price_vol_24h += (p * v)
@@ -140,8 +149,7 @@ async def get_item_liquidity(item_id, city, quality):
                             res_vol, res_p = 0, 0
                         history_cache[cache_key] = {'volume': res_vol, 'avg_p': res_p, 'time': now}
                         return res_vol, res_p
-        except Exception:
-            pass
+        except Exception: pass
     return 0, 0
 
 async def download_items():
@@ -165,7 +173,7 @@ async def download_items():
                 logger.info(f"Базу предметів завантажено: {len(items_data)} позицій")
     except Exception as e:
         logger.error(f"Помилка завантаження предметів: {e}")
-# ================= AI-АНАЛІЗ =================
+# ================= AI-АНАЛІЗ (актуальна модель) =================
 AI_ANALYSIS_PROMPT = """Ти — фінансовий аналітик ринку Albion Online. Проаналізуй наведені нижче ринкові пропозиції та вибери 15 найкращих для перепродажу.
 
 Критерії відбору:
@@ -196,9 +204,11 @@ AI_ANALYSIS_PROMPT = """Ти — фінансовий аналітик ринк�
 async def ai_scan_logic(d, f_c=None, t_c=None):
     if not gemini_client:
         return None
+
     raw_list = await scan_logic(d, f_c, t_c, ai_mode=True)
     if not raw_list:
         return []
+
     simplified_data = []
     for item in raw_list:
         item_name = items_data.get(item['id'], {}).get("LocalizedNames", {}).get("RU-RU", item['id'])
@@ -217,15 +227,19 @@ async def ai_scan_logic(d, f_c=None, t_c=None):
             "buy_age": item.get('bd', '??'),
             "sell_age": item.get('sd', '??')
         })
+
     buy_limit = d.get("buy_limit", 0)
     prompt = AI_ANALYSIS_PROMPT.replace("{data}", json.dumps(simplified_data, ensure_ascii=False, indent=2))
     prompt = prompt.replace("{buy_limit}", str(buy_limit))
+
+    logger.info("AI: Відправка запиту до Gemini...")
     response_text = None
     for attempt in range(2):
         try:
+            # Використовуємо актуальну безкоштовну модель
             response = await asyncio.to_thread(
                 gemini_client.models.generate_content,
-                model="gemini-2.5-flash-preview",
+                model="gemini-2.0-flash-exp",  # ← ЗАМІНА МОДЕЛІ
                 contents=prompt,
             )
             response_text = response.text
@@ -235,8 +249,10 @@ async def ai_scan_logic(d, f_c=None, t_c=None):
             if attempt == 1:
                 return None
             await asyncio.sleep(1)
+
     if not response_text:
         return None
+
     try:
         start = response_text.find('[')
         end = response_text.rfind(']')
@@ -245,12 +261,14 @@ async def ai_scan_logic(d, f_c=None, t_c=None):
             ai_result = json.loads(clean_json)
         else:
             raise ValueError("JSON not found")
+
         final_list = []
         for ai_item in ai_result:
             orig = next((item for item in raw_list if item['id'] == ai_item.get('item_id')), None)
             if orig:
                 orig['ai_reason'] = ai_item.get('reason', '')
                 final_list.append(orig)
+
         if len(final_list) < 15:
             existing_ids = {item['id'] for item in final_list}
             for item in raw_list:
@@ -262,7 +280,7 @@ async def ai_scan_logic(d, f_c=None, t_c=None):
         logger.error(f"AI помилка обробки JSON: {e}")
         return None
 
-# ================= ОСНОВНИЙ СКАНЕР =================
+# ================= ОСНОВНИЙ СКАНЕР (змінено сортування) =================
 async def fetch_prices_with_cache(item_ids, cities):
     global price_cache, price_cache_time
     now = time_module.time()
@@ -376,6 +394,9 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
     enriched = []
     for item in candidates_for_liquidity:
         vol, avg_p = await get_item_liquidity(item['id'], item['to'], item['q'])
+        # ДОДАНО: якщо check_liq вимкнено, ми все одно ігноруємо нульовий обсяг, бо це майже завжди фейк
+        if not check_liq and vol == 0:
+            continue
         if avg_p > 0 and item['sell'] > (avg_p * 4):
             continue
         if check_liq:
@@ -384,7 +405,6 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
                 continue
         item['vol'] = vol
         item['avg_p'] = avg_p
-        # Новий real_profit замість старого score
         item['real_profit'] = item['p_n'] * min(vol, 10)
         enriched.append(item)
 
