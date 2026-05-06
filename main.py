@@ -180,7 +180,13 @@ async def download_items():
                 logger.info(f"Базу предметів завантажено: {len(items_data)} позицій")
     except Exception as e:
         logger.error(f"Помилка завантаження предметів: {e}")
-# ================= AI-АНАЛІЗ (фікс ініціалізації + захисна пауза) =================
+# ================= Частина 2 (оновлена) =================
+
+import re, json, asyncio, logging, html, time as time_module
+from datetime import datetime, timezone
+
+# ... (усі імпорти вже є у частині 1)
+
 AI_ANALYSIS_PROMPT = """Ти — фінансовий аналітик ринку Albion Online. Проаналізуй наведені нижче ринкові пропозиції та вибери 15 найкращих для перепродажу.
 
 Критерії відбору:
@@ -240,7 +246,6 @@ async def ai_scan_logic(d, f_c=None, t_c=None):
     prompt = prompt.replace("{buy_limit}", str(buy_limit))
 
     response_text = None
-    # Пріоритет: спочатку швидші моделі (flash)
     priority_models = sorted(
         AVAILABLE_GEMINI_MODELS,
         key=lambda x: ("flash" in x, "pro" in x),
@@ -248,8 +253,7 @@ async def ai_scan_logic(d, f_c=None, t_c=None):
     )
     for model_name in priority_models:
         logger.info(f"AI: спроба з моделлю {model_name}")
-        # Захисна пауза 8 секунд перед кожним запитом (безкоштовний ліміт ~10 запитів/хв)
-        await asyncio.sleep(8)
+        await asyncio.sleep(8)   # захисна пауза
         try:
             response = await asyncio.to_thread(
                 gemini_client.models.generate_content,
@@ -297,7 +301,6 @@ async def ai_scan_logic(d, f_c=None, t_c=None):
         logger.error(f"AI помилка обробки JSON: {e}")
         return None
 
-# ================= ОСНОВНИЙ СКАНЕР (без змін, окрім зменшення AI-кандидатів до 50) =================
 async def fetch_prices_with_cache(item_ids, cities):
     global price_cache, price_cache_time
     now = time_module.time()
@@ -324,8 +327,9 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
         return []
 
     pre_res = []
-    b_l = 0 if ai_mode else d.get("buy_limit", 0)
-    p_l = 4000 if ai_mode else d.get("profit_limit", 4000)
+    # 💎 Фікс: для AI теж використовуємо реальні бюджет і профіт
+    b_l = d.get("buy_limit", 0)
+    p_l = d.get("profit_limit", 4000)
     ext = d.get("extra", False) and not ai_mode
     check_liq = d.get("check_liq", False) and not ai_mode
     MAX_AGE_MINUTES = 720 if not ai_mode else 1440
@@ -397,15 +401,21 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
                     })
 
     if ai_mode:
+        # Спеціальна обробка для AI: обов'язковий антифейк
         pre_res.sort(key=lambda x: x['p_n'], reverse=True)
-        # Зменшено до 50 кандидатів для AI, щоб було швидше
-        top_ai_candidates = pre_res[:50]
-        for item in top_ai_candidates:
+        top_ai_candidates = []
+        for item in pre_res[:40]:               # ← зменшено до 40
             vol, avg_p = await get_item_liquidity(item['id'], item['to'], item['q'])
+            # Антифейк: якщо ціна продажу в 4+ рази вища за середню — ігноруємо
+            if avg_p > 0 and item['sell'] > (avg_p * 4):
+                logger.debug(f"AI відкинуто {item['id']}: sell={item['sell']} avg={avg_p}")
+                continue
             item['vol'] = vol
             item['avg_p'] = avg_p
+            top_ai_candidates.append(item)
         return top_ai_candidates
 
+    # Звичайний режим (без змін)
     logger.info(f"Кандидатів після фільтрації цін: {len(pre_res)}")
     pre_res.sort(key=lambda x: x['p_n'], reverse=True)
     candidates_for_liquidity = pre_res[:150]
