@@ -23,6 +23,8 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 TOKEN = os.environ.get("BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
+logger.info(f"GEMINI_API_KEY: {'встановлено' if GEMINI_API_KEY else 'ВІДСУТНІЙ'}")
+
 # Ініціалізація Gemini без перевірки supported_generation_methods
 gemini_client = None
 AVAILABLE_GEMINI_MODELS = []
@@ -180,13 +182,6 @@ async def download_items():
                 logger.info(f"Базу предметів завантажено: {len(items_data)} позицій")
     except Exception as e:
         logger.error(f"Помилка завантаження предметів: {e}")
-# ================= Частина 2 (оновлена) =================
-
-import re, json, asyncio, logging, html, time as time_module
-from datetime import datetime, timezone
-
-# ... (усі імпорти вже є у частині 1)
-
 AI_ANALYSIS_PROMPT = """Ти — фінансовий аналітик ринку Albion Online. Проаналізуй наведені нижче ринкові пропозиції та вибери 15 найкращих для перепродажу.
 
 Критерії відбору:
@@ -253,7 +248,7 @@ async def ai_scan_logic(d, f_c=None, t_c=None):
     )
     for model_name in priority_models:
         logger.info(f"AI: спроба з моделлю {model_name}")
-        await asyncio.sleep(8)   # захисна пауза
+        await asyncio.sleep(8)
         try:
             response = await asyncio.to_thread(
                 gemini_client.models.generate_content,
@@ -327,7 +322,6 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
         return []
 
     pre_res = []
-    # 💎 Фікс: для AI теж використовуємо реальні бюджет і профіт
     b_l = d.get("buy_limit", 0)
     p_l = d.get("profit_limit", 4000)
     ext = d.get("extra", False) and not ai_mode
@@ -401,38 +395,35 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
                     })
 
     if ai_mode:
-        # Спеціальна обробка для AI: обов'язковий антифейк
         pre_res.sort(key=lambda x: x['p_n'], reverse=True)
         top_ai_candidates = []
-        for item in pre_res[:40]:               # ← зменшено до 40
+        for item in pre_res[:40]:
             vol, avg_p = await get_item_liquidity(item['id'], item['to'], item['q'])
-            # Антифейк: якщо ціна продажу в 4+ рази вища за середню — ігноруємо
             if avg_p > 0 and item['sell'] > (avg_p * 4):
-                logger.debug(f"AI відкинуто {item['id']}: sell={item['sell']} avg={avg_p}")
                 continue
             item['vol'] = vol
             item['avg_p'] = avg_p
             top_ai_candidates.append(item)
         return top_ai_candidates
 
-    # Звичайний режим (без змін)
+    # Звичайний режим
     logger.info(f"Кандидатів після фільтрації цін: {len(pre_res)}")
     pre_res.sort(key=lambda x: x['p_n'], reverse=True)
     candidates_for_liquidity = pre_res[:150]
     enriched = []
     for item in candidates_for_liquidity:
         vol, avg_p = await get_item_liquidity(item['id'], item['to'], item['q'])
-        if not check_liq and vol == 0:
-            continue
-        if avg_p > 0 and item['sell'] > (avg_p * 4):
-            continue
+        # Фільтр обсягу тільки при check_liq
         if check_liq:
             min_vol = 2 if item['buy'] > 100000 else 5
             if vol < min_vol:
                 continue
+        # Антифейк завжди
+        if avg_p > 0 and item['sell'] > (avg_p * 4):
+            continue
         item['vol'] = vol
         item['avg_p'] = avg_p
-        item['real_profit'] = item['p_n'] * min(vol, 10)
+        item['real_profit'] = item['p_n'] * min(vol, 10)  # при vol=0 real_profit=0
         enriched.append(item)
 
     dedup = {}
