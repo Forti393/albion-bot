@@ -23,20 +23,21 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 TOKEN = os.environ.get("BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# Автоматичний вибір робочих моделей Gemini
+# Ініціалізація Gemini без перевірки supported_generation_methods
 gemini_client = None
-AVAILABLE_GEMINI_MODELS = []  # список імен моделей, які підтримують generateContent
+AVAILABLE_GEMINI_MODELS = []
 if genai and GEMINI_API_KEY:
     try:
         gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-        # Отримуємо всі моделі та фільтруємо ті, що підтримують generateContent
+        # Просто беремо всі моделі, які містять "gemini" у назві
         models_response = gemini_client.models.list()
         for m in models_response:
-            if "generateContent" in m.supported_generation_methods:
-                AVAILABLE_GEMINI_MODELS.append(m.name)
+            name = m.name if hasattr(m, 'name') else str(m)
+            if "gemini" in name.lower():
+                AVAILABLE_GEMINI_MODELS.append(name)
         logger.info(f"Знайдено моделей Gemini: {len(AVAILABLE_GEMINI_MODELS)}")
         if not AVAILABLE_GEMINI_MODELS:
-            logger.warning("Не знайдено моделей з generateContent. AI вимкнено.")
+            logger.warning("Не знайдено жодної моделі Gemini. AI вимкнено.")
             gemini_client = None
     except Exception as e:
         logger.error(f"Помилка ініціалізації Gemini: {e}")
@@ -75,7 +76,7 @@ class BotState(StatesGroup):
     calc_sell = State()
     confirm_reset = State()
 
-# ================= СЛУЖБОВІ ФУНКЦІЇ (без змін) =================
+# ================= СЛУЖБОВІ ФУНКЦІЇ =================
 def is_blacklisted(unique_name):
     name = unique_name.upper()
     env_blacklist = os.environ.get("BLACKLIST", "")
@@ -179,7 +180,7 @@ async def download_items():
                 logger.info(f"Базу предметів завантажено: {len(items_data)} позицій")
     except Exception as e:
         logger.error(f"Помилка завантаження предметів: {e}")
-# ================= AI-АНАЛІЗ (стійкий до 429) =================
+# ================= AI-АНАЛІЗ (фікс ініціалізації + захисна пауза) =================
 AI_ANALYSIS_PROMPT = """Ти — фінансовий аналітик ринку Albion Online. Проаналізуй наведені нижче ринкові пропозиції та вибери 15 найкращих для перепродажу.
 
 Критерії відбору:
@@ -238,9 +239,8 @@ async def ai_scan_logic(d, f_c=None, t_c=None):
     prompt = AI_ANALYSIS_PROMPT.replace("{data}", json.dumps(simplified_data, ensure_ascii=False, indent=2))
     prompt = prompt.replace("{buy_limit}", str(buy_limit))
 
-    # Перебір доступних моделей при 429
     response_text = None
-    # Сортуємо: спочатку дешевші/швидші моделі (flash), потім pro
+    # Пріоритет: спочатку швидші моделі (flash)
     priority_models = sorted(
         AVAILABLE_GEMINI_MODELS,
         key=lambda x: ("flash" in x, "pro" in x),
@@ -248,27 +248,24 @@ async def ai_scan_logic(d, f_c=None, t_c=None):
     )
     for model_name in priority_models:
         logger.info(f"AI: спроба з моделлю {model_name}")
-        for attempt in range(2):  # 2 спроби на кожну модель
-            try:
-                response = await asyncio.to_thread(
-                    gemini_client.models.generate_content,
-                    model=model_name,
-                    contents=prompt,
-                )
-                response_text = response.text
-                logger.info(f"AI: успіх з {model_name}")
-                break
-            except Exception as e:
-                err_str = str(e)
-                if "429" in err_str:
-                    wait = 5 * (attempt + 1)  # 5, 10 секунд
-                    logger.warning(f"429 від {model_name}, спроба {attempt+1}. Чекаємо {wait}с...")
-                    await asyncio.sleep(wait)
-                else:
-                    logger.warning(f"AI помилка з {model_name}: {e}")
-                    break  # не 429 — переходимо до наступної моделі
-        if response_text:
-            break  # успішно отримали відповідь
+        # Захисна пауза 8 секунд перед кожним запитом (безкоштовний ліміт ~10 запитів/хв)
+        await asyncio.sleep(8)
+        try:
+            response = await asyncio.to_thread(
+                gemini_client.models.generate_content,
+                model=model_name,
+                contents=prompt,
+            )
+            response_text = response.text
+            logger.info(f"AI: успіх з {model_name}")
+            break
+        except Exception as e:
+            err_str = str(e)
+            if "429" in err_str:
+                logger.warning(f"429 від {model_name}, чекаємо 10 секунд...")
+                await asyncio.sleep(10)
+            else:
+                logger.warning(f"AI помилка з {model_name}: {e}")
 
     if not response_text:
         return None
@@ -300,7 +297,7 @@ async def ai_scan_logic(d, f_c=None, t_c=None):
         logger.error(f"AI помилка обробки JSON: {e}")
         return None
 
-# ================= ОСНОВНИЙ СКАНЕР (без змін) =================
+# ================= ОСНОВНИЙ СКАНЕР (без змін, окрім зменшення AI-кандидатів до 50) =================
 async def fetch_prices_with_cache(item_ids, cities):
     global price_cache, price_cache_time
     now = time_module.time()
@@ -401,7 +398,8 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
 
     if ai_mode:
         pre_res.sort(key=lambda x: x['p_n'], reverse=True)
-        top_ai_candidates = pre_res[:80]
+        # Зменшено до 50 кандидатів для AI, щоб було швидше
+        top_ai_candidates = pre_res[:50]
         for item in top_ai_candidates:
             vol, avg_p = await get_item_liquidity(item['id'], item['to'], item['q'])
             item['vol'] = vol
