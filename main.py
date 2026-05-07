@@ -52,6 +52,7 @@ is_db_ready = False
 http_session: Optional[aiohttp.ClientSession] = None
 scan_semaphore = asyncio.Semaphore(5)
 history_cache: Dict[str, dict] = {}
+history_fallback_cache: Dict[str, dict] = {}  # окремий кеш для 7‑денних запитів
 price_cache: Dict[str, list] = {}
 price_cache_time: float = 0
 CACHE_PRICE_TTL = 60
@@ -59,6 +60,7 @@ is_shutting_down = False
 last_scan_time: Dict[int, float] = {}
 
 CACHE_TTL = 3600
+FALLBACK_CACHE_TTL = 7200  # 2 години для 7‑денних даних
 CITIES = ["Bridgewatch", "Martlock", "Lymhurst", "Thetford", "Fort Sterling", "Caerleon", "Brecilien", "Black Market"]
 CITY_EMOJIS = {"Lymhurst":"🟢","Martlock":"🔵","Caerleon":"🔴","Thetford":"🟣","Bridgewatch":"🟠","Fort Sterling":"⚪","Brecilien":"🌸","Black Market":"⚫"}
 QUALITY_NAMES = {1:"Обычное", 2:"Хорошее", 3:"Выдающееся", 4:"Отличное", 5:"Шедевр"}
@@ -113,6 +115,7 @@ def fmt_t(s):
         return f"{m}м" if m < 60 else f"{m//60}г"
     except: return "??"
 
+# Базова функція отримання ліквідності (24 години)
 async def get_item_liquidity(item_id, city, quality):
     global http_session, history_cache
     if not http_session or http_session.closed or is_shutting_down:
@@ -160,6 +163,47 @@ async def get_item_liquidity(item_id, city, quality):
         except Exception: pass
     return 0, 0
 
+# Fallback: якщо середня ціна невідома, робимо запит за 7 днів
+async def get_item_liquidity_fallback(item_id, city, quality):
+    vol, avg_p = await get_item_liquidity(item_id, city, quality)
+    if avg_p > 0:
+        return vol, avg_p
+
+    # Шукаємо в fallback-кеші
+    global history_fallback_cache
+    cache_key = f"{item_id}|{city}|{quality}"
+    now = datetime.now(timezone.utc)
+    if cache_key in history_fallback_cache and (now - history_fallback_cache[cache_key]['time']).total_seconds() < FALLBACK_CACHE_TTL:
+        return history_fallback_cache[cache_key]['volume'], history_fallback_cache[cache_key]['avg_p']
+
+    # Запит за 7 днів
+    url = f"https://europe.albion-online-data.com/api/v2/stats/history/{item_id}?locations={city}&time-series=7&qualities={quality}"
+    async with scan_semaphore:
+        try:
+            async with http_session.get(url, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data and isinstance(data, list) and len(data) > 0:
+                        history = data[0].get('data', [])
+                        total_v = 0
+                        total_pv = 0
+                        entries = 0
+                        for day in history:
+                            v = day.get('item_count', 0)
+                            p = day.get('avg_price') or day.get('average_price', 0)
+                            if v <= 0 or p <= 0: continue
+                            total_v += v
+                            total_pv += p * v
+                            entries += 1
+                        if entries > 0:
+                            res_vol = int(total_v / max(entries, 1))
+                            res_p = int(total_pv / total_v) if total_v > 0 else 0
+                            history_fallback_cache[cache_key] = {'volume': res_vol, 'avg_p': res_p, 'time': now}
+                            return res_vol, res_p
+        except Exception: pass
+    history_fallback_cache[cache_key] = {'volume': 0, 'avg_p': 0, 'time': now}
+    return 0, 0
+
 async def download_items():
     global items_data, is_db_ready, http_session
     try:
@@ -183,15 +227,13 @@ async def download_items():
         logger.error(f"Помилка завантаження предметів: {e}")
 AI_ANALYSIS_PROMPT = """Ти — фінансовий аналітик ринку Albion Online. Проаналізуй наведені нижче ринкові пропозиції та вибери 15 найкращих для перепродажу.
 
-ВАЖЛИВО: У даних вже відсутні пропозиції, де ціна продажу більш ніж у 2 рази перевищує ціну купівлі. Обирай лише з наявних. Орієнтуйся на прибутковість, попит та свіжість цін, але не забувай ти не повинен перебільшувати щоб не була якась там ложка яка коштує 5 копійок перепродала за 5 міліонів, думай добре .
-
 Критерії відбору:
 1. Прибутковість: чистий прибуток (profit) повинен бути не менше 4000 срібла, але вище — краще.
 2. Попит: віддавай перевагу предметам із більшим обсягом продажів на день (volume). Позначка "0 шт/д" — ризик, такі предмети рідко продаються.
 3. Свіжість цін: якщо з моменту оновлення ціни купівлі або продажу минуло більше 12 годин — ризик вищий.
 4. Різноманітність: намагайся відбирати різні предмети, а не той самий з різною якістю.
 5. Бюджет гравця: {buy_limit} срібла. Не пропонуй предмети дорожчі за бюджет. Якщо бюджет = 0 – обмежень немає.
-6. Кількість: якщо в даних є достатньо хороших варіантів, поверни не менше 10 позицій.
+6. Середня ціна (avg_price) — орієнтир для визначення адекватності ціни продажу. Якщо ціна продажу значно вища за середню — це може бути пастка.
 
 Дані для аналізу (JSON):
 {data}
@@ -214,7 +256,7 @@ async def ai_scan_logic(d, f_c=None, t_c=None):
     if not gemini_client or not AVAILABLE_GEMINI_MODELS:
         return None
 
-    # Отримуємо до 200 кандидатів, але з жорсткою внутрішньою фільтрацією (×2)
+    # Отримуємо до 200 кандидатів з уже готовими fallback-даними
     raw_list = await scan_logic(d, f_c, t_c, ai_mode=True)
     if not raw_list:
         return []
@@ -332,7 +374,7 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
     ext = d.get("extra", False) and not ai_mode
     check_liq = d.get("check_liq", False) and not ai_mode
     MAX_AGE_MINUTES = 720 if not ai_mode else 1440
-    MAX_PRICE_RATIO = 2  # головне обмеження: sell <= buy * 2
+    MAX_PRICE_RATIO = 2
 
     i_list = list(items_data.keys())
     cities = [f_c, t_c] if f_c and t_c else CITIES
@@ -373,7 +415,6 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
                 sell = c_d[tc].get('buy_price_max' if is_bm else 'sell_price_min', 0)
                 if sell <= buy:
                     continue
-                # Жорстке обмеження ціни: продаж не більше ніж у 2 рази за купівлю
                 if sell > buy * MAX_PRICE_RATIO:
                     continue
                 try:
@@ -404,12 +445,14 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
                     })
 
     if ai_mode:
-        # Посилена фільтрація для AI
         pre_res.sort(key=lambda x: x['p_n'], reverse=True)
         top_ai_candidates = []
         for item in pre_res[:200]:
-            vol, avg_p = await get_item_liquidity(item['id'], item['to'], item['q'])
-            # Додатковий антифейк за середньою ціною
+            # Використовуємо fallback, щоб гарантовано мати середню ціну
+            vol, avg_p = await get_item_liquidity_fallback(item['id'], item['to'], item['q'])
+            if avg_p == 0:
+                continue  # без середньої ціни не беремо
+            # Антифейк на основі середньої ціни
             if avg_p > 0 and item['sell'] > (avg_p * 4):
                 continue
             item['vol'] = vol
@@ -423,12 +466,16 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
     candidates_for_liquidity = pre_res[:150]
     enriched = []
     for item in candidates_for_liquidity:
-        vol, avg_p = await get_item_liquidity(item['id'], item['to'], item['q'])
+        # Використовуємо fallback, щоб отримати середню ціну обов'язково
+        vol, avg_p = await get_item_liquidity_fallback(item['id'], item['to'], item['q'])
+        if avg_p == 0:
+            continue  # без середньої ціни пропускаємо
         if check_liq:
             min_vol = 2 if item['buy'] > 100000 else 5
             if vol < min_vol:
                 continue
-        if avg_p > 0 and item['sell'] > (avg_p * 4):
+        # Антифейк
+        if item['sell'] > (avg_p * 4):
             continue
         item['vol'] = vol
         item['avg_p'] = avg_p
@@ -491,7 +538,7 @@ async def disp_res(msg: types.Message, res: list, d: dict):
     for t in messages:
         await msg.answer(t, parse_mode=ParseMode.HTML)
     await msg.answer(f"📊 Усього знайдено <b>{len(res)}</b> позицій.", parse_mode=ParseMode.HTML)
-# ================= ЧАСТИНА 3 (КЛАВІАТУРА, ОБРОБНИКИ, MAIN) =================
+# ================= КЛАВІАТУРА =================
 def get_main_kb(d):
     mode = d.get("mode")
     budget = d.get("buy_limit", 0)
@@ -519,7 +566,7 @@ def get_main_kb(d):
         kb.append([KeyboardButton(text=f"🧠 AI Аналіз: {'ON' if ai_active else 'OFF'}")])
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-# ================= ОБРОБНИКИ (без змін) =================
+# ================= ОБРОБНИКИ =================
 @dp.message(Command("start"), StateFilter('*'))
 async def cmd_start(m: types.Message, state: FSMContext):
     await state.clear()
