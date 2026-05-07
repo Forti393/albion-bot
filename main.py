@@ -25,13 +25,12 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 logger.info(f"GEMINI_API_KEY: {'встановлено' if GEMINI_API_KEY else 'ВІДСУТНІЙ'}")
 
-# Ініціалізація Gemini без перевірки supported_generation_methods
+# Ініціалізація Gemini
 gemini_client = None
 AVAILABLE_GEMINI_MODELS = []
 if genai and GEMINI_API_KEY:
     try:
         gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-        # Просто беремо всі моделі, які містять "gemini" у назві
         models_response = gemini_client.models.list()
         for m in models_response:
             name = m.name if hasattr(m, 'name') else str(m)
@@ -191,6 +190,7 @@ AI_ANALYSIS_PROMPT = """Ти — фінансовий аналітик ринк�
 4. Ризики: враховуй свіжість цін. Якщо ціни старі (більше 12 годин), ризик вищий.
 5. Різноманітність: намагайся відбирати різні предмети, а не один і той самий з різною якістю.
 6. Бюджет гравця: {buy_limit} срібла. Не пропонуй предмети дорожчі за бюджет. Якщо бюджет = 0 – обмежень немає.
+7. Кількість: якщо в даних є достатньо хороших варіантів, поверни не менше 10 позицій.
 
 Дані для аналізу (JSON):
 {data}
@@ -213,9 +213,14 @@ async def ai_scan_logic(d, f_c=None, t_c=None):
     if not gemini_client or not AVAILABLE_GEMINI_MODELS:
         return None
 
+    # Отримуємо більше кандидатів (до 100), але вже чистих
     raw_list = await scan_logic(d, f_c, t_c, ai_mode=True)
     if not raw_list:
         return []
+
+    # Якщо список замалий, немає сенсу викликати AI — повертаємо його як є
+    if len(raw_list) <= 5:
+        return raw_list[:15]
 
     simplified_data = []
     for item in raw_list:
@@ -285,6 +290,7 @@ async def ai_scan_logic(d, f_c=None, t_c=None):
                 orig['ai_reason'] = ai_item.get('reason', '')
                 final_list.append(orig)
 
+        # Якщо менше 15 — дозаповнюємо найкращими з raw_list (з дедублікацією)
         if len(final_list) < 15:
             existing_ids = {item['id'] for item in final_list}
             for item in raw_list:
@@ -395,10 +401,13 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
                     })
 
     if ai_mode:
+        # Для AI: беремо до 100 кандидатів, обов'язково фільтруємо бюджет і прибуток (вже зроблено вище),
+        # а також антифейк при отриманні ліквідності
         pre_res.sort(key=lambda x: x['p_n'], reverse=True)
         top_ai_candidates = []
-        for item in pre_res[:40]:
+        for item in pre_res[:100]:
             vol, avg_p = await get_item_liquidity(item['id'], item['to'], item['q'])
+            # Антифейк: ціна продажу > 4 * середня історична → пропускаємо
             if avg_p > 0 and item['sell'] > (avg_p * 4):
                 continue
             item['vol'] = vol
@@ -423,7 +432,8 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
             continue
         item['vol'] = vol
         item['avg_p'] = avg_p
-        item['real_profit'] = item['p_n'] * min(vol, 10)  # при vol=0 real_profit=0
+        # real_profit враховує обсяг, але при vol=0 все одно дає 0, що не заважає сортуванню
+        item['real_profit'] = item['p_n'] * min(vol, 10)
         enriched.append(item)
 
     dedup = {}
