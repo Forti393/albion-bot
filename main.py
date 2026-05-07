@@ -1,10 +1,10 @@
-import os, json, aiohttp, asyncio, re, logging, signal, html, time as time_module
+import os, json, aiohttp, asyncio, re, logging, html, time as time_module
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode, ChatAction
 from aiogram.filters import Command, StateFilter
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -52,7 +52,7 @@ is_db_ready = False
 http_session: Optional[aiohttp.ClientSession] = None
 scan_semaphore = asyncio.Semaphore(5)
 history_cache: Dict[str, dict] = {}
-history_fallback_cache: Dict[str, dict] = {}  # окремий кеш для 7‑денних запитів
+history_fallback_cache: Dict[str, dict] = {}
 price_cache: Dict[str, list] = {}
 price_cache_time: float = 0
 CACHE_PRICE_TTL = 60
@@ -60,7 +60,7 @@ is_shutting_down = False
 last_scan_time: Dict[int, float] = {}
 
 CACHE_TTL = 3600
-FALLBACK_CACHE_TTL = 7200  # 2 години для 7‑денних даних
+FALLBACK_CACHE_TTL = 7200
 CITIES = ["Bridgewatch", "Martlock", "Lymhurst", "Thetford", "Fort Sterling", "Caerleon", "Brecilien", "Black Market"]
 CITY_EMOJIS = {"Lymhurst":"🟢","Martlock":"🔵","Caerleon":"🔴","Thetford":"🟣","Bridgewatch":"🟠","Fort Sterling":"⚪","Brecilien":"🌸","Black Market":"⚫"}
 QUALITY_NAMES = {1:"Обычное", 2:"Хорошее", 3:"Выдающееся", 4:"Отличное", 5:"Шедевр"}
@@ -115,15 +115,16 @@ def fmt_t(s):
         return f"{m}м" if m < 60 else f"{m//60}г"
     except: return "??"
 
-# Базова функція отримання ліквідності (24 години)
+# Оновлена функція: тепер повертає (vol, avg_p, period)
 async def get_item_liquidity(item_id, city, quality):
     global http_session, history_cache
     if not http_session or http_session.closed or is_shutting_down:
-        return 0, 0
+        return 0, 0, "???"
     cache_key = f"{item_id}|{city}|{quality}"
     now = datetime.now(timezone.utc)
     if cache_key in history_cache and (now - history_cache[cache_key]['time']).total_seconds() < CACHE_TTL:
-        return history_cache[cache_key]['volume'], history_cache[cache_key]['avg_p']
+        entry = history_cache[cache_key]
+        return entry['volume'], entry['avg_p'], entry.get('period', '24г')
     url = f"https://europe.albion-online-data.com/api/v2/stats/history/{item_id}?locations={city}&time-series=1&qualities={quality}"
     async with scan_semaphore:
         try:
@@ -153,30 +154,31 @@ async def get_item_liquidity(item_id, city, quality):
                         if vol_24h > 0:
                             res_vol = vol_24h
                             res_p = int(price_vol_24h / vol_24h)
+                            period = "24г"
                         elif vol_total > 0:
                             res_vol = int(vol_total / max(entries_total, 1))
-                            res_p = int(price_vol_total / vol_total)
+                            res_p = int(price_vol_total / vol_total) if vol_total > 0 else 0
+                            period = "24г"
                         else:
                             res_vol, res_p = 0, 0
-                        history_cache[cache_key] = {'volume': res_vol, 'avg_p': res_p, 'time': now}
-                        return res_vol, res_p
+                            period = "???"
+                        history_cache[cache_key] = {'volume': res_vol, 'avg_p': res_p, 'time': now, 'period': period}
+                        return res_vol, res_p, period
         except Exception: pass
-    return 0, 0
+    return 0, 0, "???"
 
 # Fallback: якщо середня ціна невідома, робимо запит за 7 днів
 async def get_item_liquidity_fallback(item_id, city, quality):
-    vol, avg_p = await get_item_liquidity(item_id, city, quality)
+    vol, avg_p, period = await get_item_liquidity(item_id, city, quality)
     if avg_p > 0:
-        return vol, avg_p
+        return vol, avg_p, period
 
-    # Шукаємо в fallback-кеші
     global history_fallback_cache
     cache_key = f"{item_id}|{city}|{quality}"
     now = datetime.now(timezone.utc)
     if cache_key in history_fallback_cache and (now - history_fallback_cache[cache_key]['time']).total_seconds() < FALLBACK_CACHE_TTL:
-        return history_fallback_cache[cache_key]['volume'], history_fallback_cache[cache_key]['avg_p']
-
-    # Запит за 7 днів
+        entry = history_fallback_cache[cache_key]
+        return entry['volume'], entry['avg_p'], entry.get('period', '7д')
     url = f"https://europe.albion-online-data.com/api/v2/stats/history/{item_id}?locations={city}&time-series=7&qualities={quality}"
     async with scan_semaphore:
         try:
@@ -195,14 +197,15 @@ async def get_item_liquidity_fallback(item_id, city, quality):
                             total_v += v
                             total_pv += p * v
                             entries += 1
-                        if entries > 0:
+                        if entries > 0 and total_v > 0:
                             res_vol = int(total_v / max(entries, 1))
-                            res_p = int(total_pv / total_v) if total_v > 0 else 0
-                            history_fallback_cache[cache_key] = {'volume': res_vol, 'avg_p': res_p, 'time': now}
-                            return res_vol, res_p
+                            res_p = int(total_pv / total_v)
+                            period = "7д"
+                            history_fallback_cache[cache_key] = {'volume': res_vol, 'avg_p': res_p, 'time': now, 'period': period}
+                            return res_vol, res_p, period
         except Exception: pass
-    history_fallback_cache[cache_key] = {'volume': 0, 'avg_p': 0, 'time': now}
-    return 0, 0
+    history_fallback_cache[cache_key] = {'volume': 0, 'avg_p': 0, 'time': now, 'period': '???'}
+    return 0, 0, "???"
 
 async def download_items():
     global items_data, is_db_ready, http_session
@@ -230,10 +233,11 @@ AI_ANALYSIS_PROMPT = """Ти — фінансовий аналітик ринк�
 Критерії відбору:
 1. Прибутковість: чистий прибуток (profit) повинен бути не менше 4000 срібла, але вище — краще.
 2. Попит: віддавай перевагу предметам із більшим обсягом продажів на день (volume). Позначка "0 шт/д" — ризик, такі предмети рідко продаються.
-3. Свіжість цін: якщо з моменту оновлення ціни купівлі або продажу минуло більше 12 годин — ризик вищий.
+3. Свіжість цін: якщо з моменту оновлення ціни купівлі або продажу минуло більше 5 годин — ризик вищий.
 4. Різноманітність: намагайся відбирати різні предмети, а не той самий з різною якістю.
 5. Бюджет гравця: {buy_limit} срібла. Не пропонуй предмети дорожчі за бюджет. Якщо бюджет = 0 – обмежень немає.
 6. Середня ціна (avg_price) — орієнтир для визначення адекватності ціни продажу. Якщо ціна продажу значно вища за середню — це може бути пастка.
+7. Співвідношення ціни продажу до купівлі не перевищує {max_ratio}x (це вже відфільтровано).
 
 Дані для аналізу (JSON):
 {data}
@@ -256,7 +260,6 @@ async def ai_scan_logic(d, f_c=None, t_c=None):
     if not gemini_client or not AVAILABLE_GEMINI_MODELS:
         return None
 
-    # Отримуємо до 200 кандидатів з уже готовими fallback-даними
     raw_list = await scan_logic(d, f_c, t_c, ai_mode=True)
     if not raw_list:
         return []
@@ -279,13 +282,16 @@ async def ai_scan_logic(d, f_c=None, t_c=None):
             "profit": item['p_n'],
             "volume": item['vol'],
             "avg_price": item['avg_p'],
+            "avg_period": item.get('period', '???'),
             "buy_age": item.get('bd', '??'),
             "sell_age": item.get('sd', '??')
         })
 
     buy_limit = d.get("buy_limit", 0)
+    max_ratio = d.get("max_price_ratio", 2.0)
     prompt = AI_ANALYSIS_PROMPT.replace("{data}", json.dumps(simplified_data, ensure_ascii=False, indent=2))
     prompt = prompt.replace("{buy_limit}", str(buy_limit))
+    prompt = prompt.replace("{max_ratio}", str(max_ratio))
 
     response_text = None
     priority_models = sorted(
@@ -371,10 +377,11 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
     pre_res = []
     b_l = d.get("buy_limit", 0)
     p_l = d.get("profit_limit", 4000)
-    ext = d.get("extra", False) and not ai_mode
+    ext = d.get("extra", False)                 # тепер працює і для AI
     check_liq = d.get("check_liq", False) and not ai_mode
-    MAX_AGE_MINUTES = 720 if not ai_mode else 1440
-    MAX_PRICE_RATIO = 2
+    max_ratio = d.get("max_price_ratio", 2.0)
+    MAX_AGE_MINUTES = 300                       # 5 годин для всіх
+    ONE_HOUR = 60
 
     i_list = list(items_data.keys())
     cities = [f_c, t_c] if f_c and t_c else CITIES
@@ -405,6 +412,8 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
                 age_b = (now - b_dt).total_seconds() / 60
                 if age_b > MAX_AGE_MINUTES:
                     continue
+                if ext and age_b > ONE_HOUR:
+                    continue
             except:
                 continue
             targets = [t_c] if t_c else [c for c in c_d if c != sc]
@@ -415,7 +424,7 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
                 sell = c_d[tc].get('buy_price_max' if is_bm else 'sell_price_min', 0)
                 if sell <= buy:
                     continue
-                if sell > buy * MAX_PRICE_RATIO:
+                if sell > buy * max_ratio:
                     continue
                 try:
                     sk = 'buy_price_max_date' if is_bm else 'sell_price_min_date'
@@ -423,14 +432,14 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
                     age_s = (now - s_dt).total_seconds() / 60
                     if age_s > MAX_AGE_MINUTES:
                         continue
+                    if ext and age_s > ONE_HOUR:
+                        continue
                 except:
                     continue
                 tax = 0.91 if is_bm else 0.895
                 p_n = int(sell * tax - buy)
                 p_p = int(sell * (tax + 0.04) - buy)
                 if p_n >= p_l:
-                    if ext and (age_b > 30 or age_s > 30):
-                        continue
                     pre_res.append({
                         'id': i_id,
                         'q': int(q),
@@ -448,37 +457,34 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
         pre_res.sort(key=lambda x: x['p_n'], reverse=True)
         top_ai_candidates = []
         for item in pre_res[:200]:
-            # Використовуємо fallback, щоб гарантовано мати середню ціну
-            vol, avg_p = await get_item_liquidity_fallback(item['id'], item['to'], item['q'])
+            vol, avg_p, period = await get_item_liquidity_fallback(item['id'], item['to'], item['q'])
             if avg_p == 0:
-                continue  # без середньої ціни не беремо
-            # Антифейк на основі середньої ціни
+                continue
             if avg_p > 0 and item['sell'] > (avg_p * 4):
                 continue
             item['vol'] = vol
             item['avg_p'] = avg_p
+            item['period'] = period
             top_ai_candidates.append(item)
         return top_ai_candidates
 
-    # Звичайний режим
     logger.info(f"Кандидатів після фільтрації цін: {len(pre_res)}")
     pre_res.sort(key=lambda x: x['p_n'], reverse=True)
     candidates_for_liquidity = pre_res[:150]
     enriched = []
     for item in candidates_for_liquidity:
-        # Використовуємо fallback, щоб отримати середню ціну обов'язково
-        vol, avg_p = await get_item_liquidity_fallback(item['id'], item['to'], item['q'])
+        vol, avg_p, period = await get_item_liquidity_fallback(item['id'], item['to'], item['q'])
         if avg_p == 0:
-            continue  # без середньої ціни пропускаємо
+            continue
         if check_liq:
             min_vol = 2 if item['buy'] > 100000 else 5
             if vol < min_vol:
                 continue
-        # Антифейк
         if item['sell'] > (avg_p * 4):
             continue
         item['vol'] = vol
         item['avg_p'] = avg_p
+        item['period'] = period
         item['real_profit'] = item['p_n'] * min(vol, 10)
         enriched.append(item)
 
@@ -512,6 +518,9 @@ async def disp_res(msg: types.Message, res: list, d: dict):
         liq = r.get('vol', 0)
         lbl = "🔥" if liq > 100 else ("⚡" if liq > 30 else ("✅" if liq > 5 else "🐢"))
         avg_str = f"{r['avg_p']:,}" if r['avg_p'] > 0 else "???"
+        period_str = r.get('period', '')
+        if period_str and period_str not in ('???',):
+            avg_str += f" <i>({period_str})</i>"
         ai_reason = r.get('ai_reason', '')
         reason_block = f"\n🧠 <i>AI: {ai_reason}</i>" if ai_reason else ""
 
@@ -538,38 +547,45 @@ async def disp_res(msg: types.Message, res: list, d: dict):
     for t in messages:
         await msg.answer(t, parse_mode=ParseMode.HTML)
     await msg.answer(f"📊 Усього знайдено <b>{len(res)}</b> позицій.", parse_mode=ParseMode.HTML)
-# ================= КЛАВІАТУРА =================
+# ================= КЛАВІАТУРИ =================
 def get_main_kb(d):
     mode = d.get("mode")
     budget = d.get("buy_limit", 0)
     searched = d.get("has_searched", False)
-    ai_active = d.get("ai_mode", False)
     has_results = bool(d.get("last_results"))
 
     m_btn = "Режим: 🌍 Всі міста" if mode == "all" else ("Режим: 📍 Шлях" if mode == "custom" else "🗺 Режим")
     kb = []
     if budget > 0 and mode:
         kb.append([KeyboardButton(text="🚀 Запустити сканер")])
-    if searched or ai_active:
-        kb.append([KeyboardButton(text=m_btn), KeyboardButton(text=f"⚡ 30хв: {'ON' if d.get('extra') else 'OFF'}")])
-        kb.append([
-            KeyboardButton(text=f"📊 Попит Ліміт: {'ON' if d.get('check_liq') else 'OFF'}"),
-            KeyboardButton(text="🧮 Калькулятор")
-        ])
-        kb.append([KeyboardButton(text="💰 Бюджет"), KeyboardButton(text="🔄 Скинути")])
-        kb.append([KeyboardButton(text=f"🧠 AI Аналіз: {'ON' if ai_active else 'OFF'}")])
-        if has_results:
-            kb.append([KeyboardButton(text="🔄 Оновити пошук")])
-    else:
-        kb.append([KeyboardButton(text="💰 Бюджет"), KeyboardButton(text=m_btn)])
-        kb.append([KeyboardButton(text="🧮 Калькулятор"), KeyboardButton(text="❓ Допомога")])
-        kb.append([KeyboardButton(text=f"🧠 AI Аналіз: {'ON' if ai_active else 'OFF'}")])
+    if searched:
+        kb.append([KeyboardButton(text=m_btn)])
+    kb.append([KeyboardButton(text="⚙️ Налаштування")])
+    kb.append([KeyboardButton(text="💰 Бюджет"), KeyboardButton(text="🧮 Калькулятор")])
+    kb.append([KeyboardButton(text="🔄 Скинути")])
+    if has_results:
+        kb.append([KeyboardButton(text="🔄 Оновити пошук")])
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+def get_settings_kb(d):
+    ext = d.get("extra", False)
+    check_liq = d.get("check_liq", False)
+    ai_active = d.get("ai_mode", False)
+    ratio = d.get("max_price_ratio", 2.0)
+    kb = [
+        [KeyboardButton(text=f"⚡ 1 година: {'ON' if ext else 'OFF'}")],
+        [KeyboardButton(text=f"📊 Попит Ліміт: {'ON' if check_liq else 'OFF'}")],
+        [KeyboardButton(text=f"🧠 AI Аналіз: {'ON' if ai_active else 'OFF'}")],
+        [KeyboardButton(text=f"🔗 Співвідношення x{ratio}")],
+        [KeyboardButton(text="↩️ Назад")]
+    ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 # ================= ОБРОБНИКИ =================
 @dp.message(Command("start"), StateFilter('*'))
 async def cmd_start(m: types.Message, state: FSMContext):
     await state.clear()
+    await state.update_data(max_price_ratio=2.0)  # за замовчуванням
     await m.answer("👋 <b>Привіт! Я Albion Trade Bot.</b>\nВкажіть Бюджет та Режим.", parse_mode=ParseMode.HTML, reply_markup=get_main_kb({}))
 
 @dp.message(F.text == "🚀 Запустити сканер", StateFilter('*'))
@@ -621,6 +637,57 @@ async def main_search(m: types.Message, state: FSMContext):
     await disp_res(m, res, d)
     await m.answer("✅ AI-аналіз завершено", reply_markup=get_main_kb(d))
 
+@dp.message(F.text == "⚙️ Налаштування", StateFilter('*'))
+async def settings_menu(m: types.Message, state: FSMContext):
+    d = await state.get_data()
+    await m.answer("Налаштування:", reply_markup=get_settings_kb(d))
+
+@dp.message(F.text == "↩️ Назад", StateFilter('*'))
+async def back_to_main(m: types.Message, state: FSMContext):
+    d = await state.get_data()
+    await m.answer("Головне меню:", reply_markup=get_main_kb(d))
+
+@dp.message(F.text.startswith("⚡ 1 година:"), StateFilter('*'))
+async def toggle_one_hour(m: types.Message, state: FSMContext):
+    d = await state.get_data()
+    d["extra"] = not d.get("extra", False)
+    await state.update_data(extra=d["extra"])
+    await m.answer("Оновлено.", reply_markup=get_settings_kb(d))
+
+@dp.message(F.text.startswith("📊 Попит Ліміт:"), StateFilter('*'))
+async def toggle_demand_limit(m: types.Message, state: FSMContext):
+    d = await state.get_data()
+    d["check_liq"] = not d.get("check_liq", False)
+    await state.update_data(check_liq=d["check_liq"])
+    await m.answer("Оновлено.", reply_markup=get_settings_kb(d))
+
+@dp.message(F.text.startswith("🧠 AI Аналіз:"), StateFilter('*'))
+async def toggle_ai_mode(m: types.Message, state: FSMContext):
+    d = await state.get_data()
+    d["ai_mode"] = not d.get("ai_mode", False)
+    await state.update_data(ai_mode=d["ai_mode"])
+    await m.answer("Оновлено.", reply_markup=get_settings_kb(d))
+
+@dp.message(F.text.startswith("🔗 Співвідношення"), StateFilter('*'))
+async def choose_ratio(m: types.Message, state: FSMContext):
+    await m.answer("Оберіть максимальне співвідношення продаж/купівля:",
+                   reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                       [InlineKeyboardButton(text="x1.5", callback_data="set_ratio_1.5"),
+                        InlineKeyboardButton(text="x2", callback_data="set_ratio_2.0"),
+                        InlineKeyboardButton(text="x2.5", callback_data="set_ratio_2.5"),
+                        InlineKeyboardButton(text="x3", callback_data="set_ratio_3.0")]
+                   ]))
+
+@dp.callback_query(F.data.startswith("set_ratio_"))
+async def set_ratio_cb(cb: types.CallbackQuery, state: FSMContext):
+    ratio_str = cb.data.split("_")[2]
+    ratio = float(ratio_str)
+    await state.update_data(max_price_ratio=ratio)
+    d = await state.get_data()
+    await cb.message.edit_text(f"Співвідношення встановлено: x{ratio}.")
+    # повертаємо клавіатуру налаштувань
+    await cb.message.answer("Оновлено.", reply_markup=get_settings_kb(d))
+
 @dp.message(F.text == "🔄 Оновити пошук", StateFilter('*'))
 async def refresh_search(m: types.Message, state: FSMContext):
     d = await state.get_data()
@@ -657,10 +724,11 @@ async def refresh_search(m: types.Message, state: FSMContext):
                 updated.append(r)
     if updated:
         await disp_res(m, updated, d)
-        await m.answer("🔄 Ціни оновлено (кеш скинуто).", reply_markup=get_main_kb(d))
+        await m.answer("🔄 Ціни оновлено.", reply_markup=get_main_kb(d))
     else:
-        await m.answer("😕 Пропозиції більше не актуальні. Запустіть новий пошук.")
+        await m.answer("😕 Пропозиції більше не актуальні.", reply_markup=get_main_kb(d))
 
+# Обробники для вибору міст, бюджету, калькулятора, скидання залишаються без змін
 @dp.message(F.text.startswith("Режим:") | (F.text == "🗺 Режим"), StateFilter('*'))
 async def choose_mode(m: types.Message, state: FSMContext):
     await m.answer("Оберіть режим:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -736,6 +804,7 @@ async def reset_confirm(m: types.Message, state: FSMContext):
 async def reset_action(cb: types.CallbackQuery, state: FSMContext):
     if cb.data == "reset_yes":
         await state.clear()
+        await state.update_data(max_price_ratio=2.0)
         await cb.message.edit_text("🔄 Скинуто.")
         await cb.message.answer("Почнемо заново?", reply_markup=get_main_kb({}))
     else:
@@ -776,20 +845,6 @@ async def numeric_handler(m: types.Message, state: FSMContext):
         await m.answer(f"✅ Збережено: {v:,}", reply_markup=get_main_kb(await state.get_data()))
     except ValueError:
         await m.answer("❌ Введіть ціле число!")
-
-@dp.message(F.text.regexp(r"⚡ 30хв:|📊 Попит Ліміт:|🧠 AI Аналіз:"), StateFilter('*'))
-async def toggles(m: types.Message, state: FSMContext):
-    d = await state.get_data()
-    if "⚡" in m.text:
-        key = "extra"
-    elif "📊" in m.text:
-        key = "check_liq"
-    else:
-        key = "ai_mode"
-    val = not d.get(key, False)
-    await state.update_data({key: val})
-    msg = "Увімкнено" if val else "Вимкнено"
-    await m.answer(f"{msg}.", reply_markup=get_main_kb(await state.get_data()))
 
 # ================= ЗАПУСК =================
 async def main():
