@@ -1,3 +1,4 @@
+# ================= ЧАСТИНА 1 (ІМПОРТИ, КОНФІГУРАЦІЯ, ДОПОМІЖНІ ФУНКЦІЇ) =================
 import os, json, aiohttp, asyncio, re, logging, signal, html, time as time_module
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Dict
@@ -181,7 +182,10 @@ async def download_items():
                 logger.info(f"Базу предметів завантажено: {len(items_data)} позицій")
     except Exception as e:
         logger.error(f"Помилка завантаження предметів: {e}")
+# ================= ЧАСТИНА 2 (AI-АНАЛІЗ, ПОКРАЩЕНИЙ СКАНЕР, ВІДОБРАЖЕННЯ) =================
 AI_ANALYSIS_PROMPT = """Ти — фінансовий аналітик ринку Albion Online. Проаналізуй наведені нижче ринкові пропозиції та вибери 15 найкращих для перепродажу.
+
+ВАЖЛИВО: Багато пропозицій мають очевидно нереалістичні ціни (наприклад, предмет купують за 80,000, а продають за 99,000,000). Це пастки або помилкові ордери. Орієнтуйся на середню ціну (avg_price) та здоровий глузд. Якщо різниця між купівлею та продажем надто велика (більше ніж у 50 разів) — це точно фейк, не бери його.
 
 Критерії відбору:
 1. Адекватність ціни: ціна продажу не повинна бути завищеною в кілька разів порівняно з середньою історією. Такі пропозиції — пастки, їх ігноруй.
@@ -213,12 +217,11 @@ async def ai_scan_logic(d, f_c=None, t_c=None):
     if not gemini_client or not AVAILABLE_GEMINI_MODELS:
         return None
 
-    # Отримуємо більше кандидатів (до 100), але вже чистих
+    # Отримуємо до 200 кандидатів (але з жорсткою фільтрацією всередині ai_mode)
     raw_list = await scan_logic(d, f_c, t_c, ai_mode=True)
     if not raw_list:
         return []
 
-    # Якщо список замалий, немає сенсу викликати AI — повертаємо його як є
     if len(raw_list) <= 5:
         return raw_list[:15]
 
@@ -290,7 +293,6 @@ async def ai_scan_logic(d, f_c=None, t_c=None):
                 orig['ai_reason'] = ai_item.get('reason', '')
                 final_list.append(orig)
 
-        # Якщо менше 15 — дозаповнюємо найкращими з raw_list (з дедублікацією)
         if len(final_list) < 15:
             existing_ids = {item['id'] for item in final_list}
             for item in raw_list:
@@ -401,14 +403,16 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
                     })
 
     if ai_mode:
-        # Для AI: беремо до 100 кандидатів, обов'язково фільтруємо бюджет і прибуток (вже зроблено вище),
-        # а також антифейк при отриманні ліквідності
+        # Посилена фільтрація для AI
         pre_res.sort(key=lambda x: x['p_n'], reverse=True)
         top_ai_candidates = []
-        for item in pre_res[:100]:
+        for item in pre_res[:200]:  # більше кандидатів, але з перевірками
             vol, avg_p = await get_item_liquidity(item['id'], item['to'], item['q'])
-            # Антифейк: ціна продажу > 4 * середня історична → пропускаємо
+            # 1. Антифейк за середньою ціною
             if avg_p > 0 and item['sell'] > (avg_p * 4):
+                continue
+            # 2. Відкидаємо явні маячні різниці (продаж більш ніж у 50 разів вищий за купівлю)
+            if item['sell'] > item['buy'] * 50:
                 continue
             item['vol'] = vol
             item['avg_p'] = avg_p
@@ -422,17 +426,14 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
     enriched = []
     for item in candidates_for_liquidity:
         vol, avg_p = await get_item_liquidity(item['id'], item['to'], item['q'])
-        # Фільтр обсягу тільки при check_liq
         if check_liq:
             min_vol = 2 if item['buy'] > 100000 else 5
             if vol < min_vol:
                 continue
-        # Антифейк завжди
         if avg_p > 0 and item['sell'] > (avg_p * 4):
             continue
         item['vol'] = vol
         item['avg_p'] = avg_p
-        # real_profit враховує обсяг, але при vol=0 все одно дає 0, що не заважає сортуванню
         item['real_profit'] = item['p_n'] * min(vol, 10)
         enriched.append(item)
 
@@ -492,7 +493,7 @@ async def disp_res(msg: types.Message, res: list, d: dict):
     for t in messages:
         await msg.answer(t, parse_mode=ParseMode.HTML)
     await msg.answer(f"📊 Усього знайдено <b>{len(res)}</b> позицій.", parse_mode=ParseMode.HTML)
-# ================= КЛАВІАТУРА =================
+# ================= ЧАСТИНА 3 (КЛАВІАТУРА, ОБРОБНИКИ, MAIN) =================
 def get_main_kb(d):
     mode = d.get("mode")
     budget = d.get("buy_limit", 0)
@@ -520,7 +521,7 @@ def get_main_kb(d):
         kb.append([KeyboardButton(text=f"🧠 AI Аналіз: {'ON' if ai_active else 'OFF'}")])
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-# ================= ОБРОБНИКИ =================
+# ================= ОБРОБНИКИ (без змін) =================
 @dp.message(Command("start"), StateFilter('*'))
 async def cmd_start(m: types.Message, state: FSMContext):
     await state.clear()
