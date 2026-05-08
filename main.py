@@ -93,7 +93,7 @@ class BotState(StatesGroup):
 def is_blacklisted(unique_name):
     name = unique_name.upper()
     env_blacklist = os.environ.get("BLACKLIST", "")
-    if env_blacklist: # ВИПРАВЛЕНО ТУТ: перевіряємо, чи він не порожній
+    if env_blacklist:
         for w in env_blacklist.split(","):
             w_clean = w.strip().upper()
             if w_clean and w_clean in name:
@@ -205,7 +205,7 @@ async def download_items():
                         if len(uid) < 2: continue
                         tier = uid[1]
                         if tier not in ["4", "5", "6", "7", "8"]: continue
-                        if not any(x in uid for x in allowed_types): continue # Зберігаємо тільки те, що реально торгується
+                        if not any(x in uid for x in allowed_types): continue
                         if is_blacklisted(uid): continue
                         new_items[uid] = i
 
@@ -221,7 +221,6 @@ async def download_items():
             logger.error(f"Спроба {attempt+1}: помилка: {e}")
         await asyncio.sleep(5)
     logger.critical("Не вдалося завантажити базу після 3 спроб")
-
 AI_ANALYSIS_PROMPT = """Ти — фінансовий аналітик ринку Albion Online. Проаналізуй наведені нижче ринкові пропозиції та вибери 15 найкращих для перепродажу.
 
 Критерії відбору:
@@ -367,7 +366,8 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
         pre_res.sort(key=lambda x: x['p_n'], reverse=True); top_ai = []
         for item in pre_res[:200]:
             vol, avg_p, period = await get_item_liquidity_fallback(item['id'], item['to'], item['q'])
-            if avg_p == 0 or (avg_p > 0 and item['sell'] > (avg_p * max_avg_mult)): continue
+            # Дозволяємо предмети з невідомою середньою ціною
+            if avg_p > 0 and item['sell'] > (avg_p * max_avg_mult): continue
             item['vol'] = vol; item['avg_p'] = avg_p; item['price_period'] = period
             top_ai.append(item)
         return top_ai
@@ -376,7 +376,8 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
     enriched = []
     for item in pre_res[:150]:
         vol, avg_p, period = await get_item_liquidity_fallback(item['id'], item['to'], item['q'])
-        if avg_p == 0 or item['sell'] > (avg_p * max_avg_mult): continue
+        # Дозволяємо предмети з невідомою середньою ціною
+        if avg_p > 0 and item['sell'] > (avg_p * max_avg_mult): continue
         if check_liq:
             if vol < (2 if item['buy'] > 100000 else 5): continue
         item['vol'] = vol; item['avg_p'] = avg_p; item['price_period'] = period
