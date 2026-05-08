@@ -209,23 +209,46 @@ async def download_items():
                         logger.error(f"Отриманий JSON не є списком, тип: {type(data)}")
                         continue
                     logger.info(f"Отримано {len(data)} записів з GitHub")
-                    if data:
-                        # Показуємо приклад першого елементу
-                        logger.info(f"Зразок першого запису: {json.dumps(data[0], ensure_ascii=False)[:500]}")
+
+                    # Визначаємо правильний ключ для унікального імені
+                    key_candidates = ["UniqueName", "uniquename", "@uniquename", "ItemId", "item_id"]
+                    uid_key = None
+                    for item in data[:50]:  # перевіряємо перші 50 записів
+                        for k in key_candidates:
+                            if k in item and isinstance(item[k], str) and item[k].startswith(("T4_","T5_","T6_","T7_","T8_")):
+                                uid_key = k
+                                break
+                        if uid_key:
+                            break
+                    if not uid_key:
+                        # Якщо не знайшли — спробуємо взяти будь-який ключ, що починається з T4_
+                        for item in data[:100]:
+                            for k, v in item.items():
+                                if isinstance(v, str) and v.startswith(("T4_","T5_","T6_","T7_","T8_")):
+                                    uid_key = k
+                                    break
+                            if uid_key:
+                                break
+                    if not uid_key:
+                        logger.error("Не вдалося знайти поле з назвою предмета (T4_..T8_)")
+                        items_data = {}
+                        is_db_ready = False
+                        return
+                    logger.info(f"Використовується ключ: {uid_key}")
 
                     allowed = ["weapon","armor","plate","leather","cloth","bag","cape","potion","meal","mount","tool","offhand"]
-                    filtered = []
+                    items_data = {}
                     for i in data:
-                        uid = i.get("UniqueName", "")
+                        uid = i.get(uid_key)
+                        if not uid or not isinstance(uid, str):
+                            continue
                         if not uid.startswith(("T4_","T5_","T6_","T7_","T8_")):
                             continue
-                        # Перевіряємо наявність хоча б одного ключового слова в UniqueName
                         if not any(x in uid.lower() for x in allowed):
                             continue
                         if is_blacklisted(uid):
                             continue
-                        filtered.append(i)
-                    items_data = {i["UniqueName"]: i for i in filtered}
+                        items_data[uid] = i
                     is_db_ready = True
                     logger.info(f"Базу предметів завантажено: {len(items_data)} позицій")
                     return
