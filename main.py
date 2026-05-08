@@ -437,18 +437,36 @@ async def disp_res(msg, res, d):
         if period: avg_str += f" ({period})"
         ai_reason = r.get('ai_reason', '')
         reason_block = f"\n🧠 <i>AI: {ai_reason}</i>" if ai_reason else ""
+
+        # Виправлений блок: виносимо значення у змінні
+        p_p_val = r["p_p"]
+        p_n_val = r["p_n"]
+        profit_line = (
+            f"<pre>"
+            f"Прибуток:\n"
+            f"{'👑 ' + f'{p_p_val:,}':<17} Попит: {lbl} {liq} шт/д\n"
+            f"{'💀 ' + f'{p_n_val:,}':<17} Сер.ціна: {avg_str}"
+            f"</pre>"
+        )
+
         block = (
             f"{idx}) {icon} <b>{name}</b> [{tier}.{enc}]\n"
             f"✨ {QUALITY_NAMES.get(r['q'], 'Обычное')}\n"
             f"📥 {CITY_EMOJIS[r['from']]} {r['buy']:,} | 🕒 {tbd}\n"
             f"📤 {CITY_EMOJIS[r['to']]} {r['sell']:,} | 🕒 {tsd}\n"
-            f"<pre>Прибуток:\n{f'👑 {r[\"p_p\"]:,}':<17} Попит: {lbl} {liq} шт/д\n{f'💀 {r[\"p_n\"]:,}':<17} Сер.ціна: {avg_str}</pre>"
-            f"{reason_block}\n───────────────────\n\n"
+            f"{profit_line}"
+            f"{reason_block}\n"
+            f"───────────────────\n\n"
         )
-        if len(full)+len(block)>3900: messages.append(full); full=block
-        else: full+=block
-    if full: messages.append(full)
-    for t in messages: await msg.answer(t, parse_mode=ParseMode.HTML)
+        if len(full)+len(block)>3900:
+            messages.append(full)
+            full = block
+        else:
+            full += block
+    if full:
+        messages.append(full)
+    for t in messages:
+        await msg.answer(t, parse_mode=ParseMode.HTML)
     await msg.answer(f"📊 Усього знайдено <b>{len(res)}</b> позицій.", parse_mode=ParseMode.HTML)
 def get_main_kb(d):
     mode = d.get("mode")
