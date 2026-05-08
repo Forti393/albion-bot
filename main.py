@@ -198,7 +198,6 @@ async def get_item_liquidity_fallback(item_id,city,quality):
     return 0,0,None
 
 async def download_items():
-    """Завантаження бази предметів із повторними спробами."""
     global items_data, is_db_ready, http_session
     url = "https://raw.githubusercontent.com/ao-data/ao-bin-dumps/master/formatted/items.json"
     for attempt in range(3):
@@ -206,14 +205,27 @@ async def download_items():
             async with http_session.get(url, timeout=60) as r:
                 if r.status == 200:
                     data = await r.json(content_type=None)
+                    if not isinstance(data, list):
+                        logger.error(f"Отриманий JSON не є списком, тип: {type(data)}")
+                        continue
+                    logger.info(f"Отримано {len(data)} записів з GitHub")
+                    if data:
+                        # Показуємо приклад першого елементу
+                        logger.info(f"Зразок першого запису: {json.dumps(data[0], ensure_ascii=False)[:500]}")
+
                     allowed = ["weapon","armor","plate","leather","cloth","bag","cape","potion","meal","mount","tool","offhand"]
-                    items_data = {
-                        i["UniqueName"]: i
-                        for i in data
-                        if i.get("UniqueName","").startswith(("T4_","T5_","T6_","T7_","T8_"))
-                        and any(x in i.get("UniqueName","").lower() for x in allowed)
-                        and not is_blacklisted(i.get("UniqueName",""))
-                    }
+                    filtered = []
+                    for i in data:
+                        uid = i.get("UniqueName", "")
+                        if not uid.startswith(("T4_","T5_","T6_","T7_","T8_")):
+                            continue
+                        # Перевіряємо наявність хоча б одного ключового слова в UniqueName
+                        if not any(x in uid.lower() for x in allowed):
+                            continue
+                        if is_blacklisted(uid):
+                            continue
+                        filtered.append(i)
+                    items_data = {i["UniqueName"]: i for i in filtered}
                     is_db_ready = True
                     logger.info(f"Базу предметів завантажено: {len(items_data)} позицій")
                     return
@@ -221,7 +233,7 @@ async def download_items():
                     logger.warning(f"Спроба {attempt+1}: HTTP {r.status} при завантаженні items.json")
         except Exception as e:
             logger.error(f"Спроба {attempt+1}: помилка завантаження items.json: {e}")
-        await asyncio.sleep(5)  # зачекати перед повторною спробою
+        await asyncio.sleep(5)
     logger.critical("Не вдалося завантажити базу предметів після 3 спроб!")
 AI_ANALYSIS_PROMPT = """Ти — фінансовий аналітик ринку Albion Online. Проаналізуй наведені нижче ринкові пропозиції та вибери 15 найкращих для перепродажу.
 
