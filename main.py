@@ -214,7 +214,6 @@ async def download_items():
                     key_candidates = ["UniqueName", "@uniquename", "ItemId", "item_id"]
                     best_key = None
                     best_count = 0
-                    # Аналізуємо перші 100 записів, щоб знайти найкраще поле
                     sample = data[:100]
                     for key in key_candidates:
                         count = 0
@@ -225,7 +224,6 @@ async def download_items():
                         if count > best_count:
                             best_count = count
                             best_key = key
-                    # Якщо жоден кандидат не підійшов, шукаємо будь-яке поле з префіксом T4_
                     if not best_key:
                         for item in sample:
                             for k, v in item.items():
@@ -240,6 +238,14 @@ async def download_items():
                         is_db_ready = False
                         return
                     logger.info(f"Використовується ключ: {best_key} (знайдено {best_count} збігів у вибірці)")
+
+                    # ЛОГУВАННЯ РЕАЛЬНИХ ЗНАЧЕНЬ для діагностики
+                    sample_uids = []
+                    for i in data[:100]:
+                        uid = i.get(best_key)
+                        if uid:
+                            sample_uids.append(str(uid)[:100])
+                    logger.info(f"Приклади uid (перші 15): {sample_uids[:15]}")
 
                     items_data = {}
                     for i in data:
