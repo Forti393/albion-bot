@@ -72,8 +72,7 @@ QUALITY_NAMES = {1:"Обычное", 2:"Хорошее", 3:"Выдающееся
 TRASH = ["Знаток ","Мастер ","Великий мастер ","Старейшина ","Ученик ","Новичок "]
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-# Чорний список ПОВНІСТЮ ОЧИЩЕНО, щоб уникнути масового відсіювання
-BLACKLIST_KEYWORDS = []  # Додайте сюди ключові слова за потреби, наприклад ["OFF_BOOK"]
+BLACKLIST_KEYWORDS = ["OFF_BOOK"]
 
 RATIO_OPTIONS = [1.5, 2.0, 2.5, 3.0]
 AVG_MULTIPLIER_OPTIONS = [1.2, 1.5, 1.8, 2.0, 2.2, 2.5, 3.0, 3.5, 4.0]
@@ -93,11 +92,13 @@ class BotState(StatesGroup):
     settings_menu = State()
 
 def is_blacklisted(unique_name):
-    """Перевіряє, чи предмет у чорному списку (поки що список порожній)."""
     name = unique_name.upper()
+    env_blacklist = os.environ.get("BLACKLIST", "")
+    for w in env_blacklist.split(","):
+        if w.strip().upper() in name:
+            return True
     for w in BLACKLIST_KEYWORDS:
-        # Перевірка w потрібна, щоб порожній рядок не матчив усе підряд
-        if w and w in name:
+        if w in name:
             return True
     return False
 
@@ -209,7 +210,7 @@ async def download_items():
                         continue
                     logger.info(f"Отримано {len(data)} записів з GitHub")
 
-                    # Визначення ключа UID
+                    # Кандидати ключів для пошуку ідентифікатора предмета
                     key_candidates = ["UniqueName", "@uniquename", "ItemId", "item_id"]
                     best_key = None
                     best_count = 0
@@ -217,20 +218,18 @@ async def download_items():
                     for key in key_candidates:
                         count = 0
                         for item in sample:
-                            if isinstance(item, dict):
-                                val = item.get(key)
-                                if isinstance(val, str) and val.startswith(("T4_","T5_","T6_","T7_","T8_")):
-                                    count += 1
+                            val = item.get(key)
+                            if isinstance(val, str) and val.startswith(("T4_","T5_","T6_","T7_","T8_")):
+                                count += 1
                         if count > best_count:
                             best_count = count
                             best_key = key
                     if not best_key:
                         for item in sample:
-                            if isinstance(item, dict):
-                                for k, v in item.items():
-                                    if isinstance(v, str) and v.startswith(("T4_","T5_","T6_","T7_","T8_")):
-                                        best_key = k
-                                        break
+                            for k, v in item.items():
+                                if isinstance(v, str) and v.startswith(("T4_","T5_","T6_","T7_","T8_")):
+                                    best_key = k
+                                    break
                             if best_key:
                                 break
                     if not best_key:
@@ -240,19 +239,25 @@ async def download_items():
                         return
                     logger.info(f"Використовується ключ: {best_key} (знайдено {best_count} збігів у вибірці)")
 
-                    items_data = {}
-                    for item in data:
-                        if not isinstance(item, dict):
-                            continue
-                        uid = item.get(best_key)
+                    # ФОРМУВАННЯ БАЗИ (ВИПРАВЛЕНО)
+                    new_items = {}
+                    for i in data:
+                        uid = i.get(best_key)
                         if not uid or not isinstance(uid, str):
                             continue
                         if not uid.startswith(("T4_","T5_","T6_","T7_","T8_")):
                             continue
                         if is_blacklisted(uid):
                             continue
-                        items_data[uid] = item
+                        new_items[uid] = i
 
+                    if not new_items:
+                        logger.error("Не знайдено жодного предмета T4_-T8_ після фільтрації!")
+                        items_data = {}
+                        is_db_ready = False
+                        return
+
+                    items_data = new_items
                     is_db_ready = True
                     logger.info(f"Базу предметів завантажено: {len(items_data)} позицій")
                     return
@@ -262,6 +267,7 @@ async def download_items():
             logger.error(f"Спроба {attempt+1}: помилка завантаження items.json: {e}")
         await asyncio.sleep(5)
     logger.critical("Не вдалося завантажити базу предметів після 3 спроб!")
+# Частина 2 (AI, сканер, відображення)
 AI_ANALYSIS_PROMPT = """Ти — фінансовий аналітик ринку Albion Online. Проаналізуй наведені нижче ринкові пропозиції та вибери 15 найкращих для перепродажу.
 
 Критерії відбору:
@@ -438,7 +444,7 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
         top_ai = []
         for item in pre_res[:200]:
             vol, avg_p, period = await get_item_liquidity_fallback(item['id'], item['to'], item['q'])
-            if avg_p == 0: continue  # для AI без середньої ціни не варто
+            if avg_p == 0: continue
             if avg_p > 0 and item['sell'] > (avg_p * max_avg_mult): continue
             item['vol'] = vol; item['avg_p'] = avg_p; item['price_period'] = period
             top_ai.append(item)
@@ -450,16 +456,13 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
     enriched = []
     for item in candidates:
         vol, avg_p, period = await get_item_liquidity_fallback(item['id'], item['to'], item['q'])
-        # Більше не вимагаємо avg_p > 0 обов'язково
+        if avg_p == 0: continue
         if check_liq:
             min_vol = 2 if item['buy'] > 100000 else 5
             if vol < min_vol: continue
-        # Антифейк тільки якщо є середня ціна
-        if avg_p > 0 and item['sell'] > (avg_p * max_avg_mult): continue
-        item['vol'] = vol
-        item['avg_p'] = avg_p
-        item['price_period'] = period
-        item['real_profit'] = item['p_n'] * min(vol, 10) if vol > 0 else item['p_n']
+        if item['sell'] > (avg_p * max_avg_mult): continue
+        item['vol'] = vol; item['avg_p'] = avg_p; item['price_period'] = period
+        item['real_profit'] = item['p_n'] * min(vol, 10)
         enriched.append(item)
     dedup = {}
     for item in enriched:
@@ -492,7 +495,6 @@ async def disp_res(msg, res, d):
         ai_reason = r.get('ai_reason', '')
         reason_block = f"\n🧠 <i>AI: {ai_reason}</i>" if ai_reason else ""
 
-        # Виправлений блок із змінними
         p_p_val = r["p_p"]
         p_n_val = r["p_n"]
         profit_line = (
@@ -522,6 +524,7 @@ async def disp_res(msg, res, d):
     for t in messages:
         await msg.answer(t, parse_mode=ParseMode.HTML)
     await msg.answer(f"📊 Усього знайдено <b>{len(res)}</b> позицій.", parse_mode=ParseMode.HTML)
+# Частина 3 (клавіатура, обробники, main)
 def get_main_kb(d):
     mode = d.get("mode")
     budget = d.get("buy_limit", 0)
@@ -676,8 +679,9 @@ async def main_search(m, state: FSMContext):
     if not is_db_ready:
         await m.answer("⏳ База предметів не завантажена. Пробую завантажити...")
         await download_items()
-        if not is_db_ready:
+        if not is_db_ready or not items_data:
             return await m.answer("❌ Не вдалося завантажити базу предметів. Спробуйте пізніше.")
+        await m.answer(f"✅ Базу завантажено ({len(items_data)} предметів). Розпочинаю пошук...")
 
     ai_active = d.get("ai_mode", False)
     if not ai_active:
