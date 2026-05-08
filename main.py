@@ -186,6 +186,7 @@ async def get_item_liquidity_fallback(item_id,city,quality):
         except: pass
     history_fallback_cache[cache_key]={'volume':0,'avg_p':0,'time':now}
     return 0,0,None
+
 async def download_items():
     global items_data, is_db_ready, http_session
     url = "https://raw.githubusercontent.com/ao-data/ao-bin-dumps/master/formatted/items.json"
@@ -316,6 +317,7 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
     pre_res = []; b_l = d.get("buy_limit", 0); p_l = d.get("profit_limit", 4000)
     ext = d.get("extra", False); check_liq = d.get("check_liq", False)
     max_ratio = float(d.get("max_ratio", 2.0)); max_avg_mult = float(d.get("max_avg_mult", 4.0))
+    allow_zero_avg = d.get("allow_zero_avg", False)   # НОВЕ
     MAX_AGE_MINUTES = 300
 
     i_list = list(items_data.keys())
@@ -366,8 +368,11 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
         pre_res.sort(key=lambda x: x['p_n'], reverse=True); top_ai = []
         for item in pre_res[:200]:
             vol, avg_p, period = await get_item_liquidity_fallback(item['id'], item['to'], item['q'])
-            # Дозволяємо предмети з невідомою середньою ціною
-            if avg_p > 0 and item['sell'] > (avg_p * max_avg_mult): continue
+            if avg_p == 0:
+                if not allow_zero_avg: continue   # не показуємо без дозволу
+                # антифейк не перевіряємо для невідомої середньої
+            else:
+                if item['sell'] > (avg_p * max_avg_mult): continue
             item['vol'] = vol; item['avg_p'] = avg_p; item['price_period'] = period
             top_ai.append(item)
         return top_ai
@@ -376,8 +381,10 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
     enriched = []
     for item in pre_res[:150]:
         vol, avg_p, period = await get_item_liquidity_fallback(item['id'], item['to'], item['q'])
-        # Дозволяємо предмети з невідомою середньою ціною
-        if avg_p > 0 and item['sell'] > (avg_p * max_avg_mult): continue
+        if avg_p == 0:
+            if not allow_zero_avg: continue
+        else:
+            if item['sell'] > (avg_p * max_avg_mult): continue
         if check_liq:
             if vol < (2 if item['buy'] > 100000 else 5): continue
         item['vol'] = vol; item['avg_p'] = avg_p; item['price_period'] = period
@@ -408,8 +415,11 @@ async def disp_res(msg, res, d):
         liq = r.get('vol', 0)
         lbl = "🔥" if liq>100 else ("⚡" if liq>30 else ("✅" if liq>5 else "🐢"))
         avg_p = r.get('avg_p', 0); period = r.get('price_period', '')
-        avg_str = f"{avg_p:,}" if avg_p>0 else "???"
-        if period: avg_str += f" ({period})"
+        if avg_p > 0:
+            avg_str = f"{avg_p:,}"
+            if period: avg_str += f" ({period})"
+        else:
+            avg_str = "0 (невід.)"
         ai_reason = f"\n🧠 <i>AI: {r.get('ai_reason', '')}</i>" if r.get('ai_reason') else ""
 
         block = (
@@ -448,12 +458,14 @@ def get_main_kb(d):
 def get_settings_kb(d):
     extra = d.get("extra", False); check_liq = d.get("check_liq", False); ai_mode = d.get("ai_mode", False)
     max_ratio = float(d.get("max_ratio", 2.0)); max_avg_mult = float(d.get("max_avg_mult", 4.0))
+    allow_zero_avg = d.get("allow_zero_avg", False)
     kb = [
         [KeyboardButton(text=f"⏱ 1 година: {'ON' if extra else 'OFF'}")],
         [KeyboardButton(text=f"📊 Попит Ліміт: {'ON' if check_liq else 'OFF'}")],
         [KeyboardButton(text=f"🧠 AI Аналіз: {'ON' if ai_mode else 'OFF'}")],
         [KeyboardButton(text=f"📈 Макс. множник: ×{max_ratio}")],
         [KeyboardButton(text=f"📉 Антифейк ×: {max_avg_mult}")],
+        [KeyboardButton(text=f"0 сер. ціна: {'ON' if allow_zero_avg else 'OFF'}")],
         [KeyboardButton(text="🔙 Назад")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
@@ -490,6 +502,9 @@ async def handle_settings(m, state: FSMContext):
         await state.set_state(BotState.waiting_for_avg_mult)
         await m.answer("Оберіть антифейк множник:", reply_markup=ReplyKeyboardMarkup(
             keyboard=[[KeyboardButton(text=f"×{a}") for a in AVG_MULTIPLIER_OPTIONS], [KeyboardButton(text="🔙 Назад")]], resize_keyboard=True))
+    elif text.startswith("0 сер. ціна"):
+        val = not d.get("allow_zero_avg", False); await state.update_data(allow_zero_avg=val)
+        await m.answer(f"Нульова сер. ціна: {'ON' if val else 'OFF'}.", reply_markup=get_settings_kb(await state.get_data()))
 
 @dp.message(StateFilter(BotState.waiting_for_max_ratio))
 async def set_max_ratio(m, state: FSMContext):
