@@ -210,41 +210,46 @@ async def download_items():
                         continue
                     logger.info(f"Отримано {len(data)} записів з GitHub")
 
-                    # Визначаємо правильний ключ для унікального імені
-                    key_candidates = ["UniqueName", "uniquename", "@uniquename", "ItemId", "item_id"]
-                    uid_key = None
-                    for item in data[:50]:
-                        for k in key_candidates:
-                            if k in item and isinstance(item[k], str) and item[k].startswith(("T4_","T5_","T6_","T7_","T8_")):
-                                uid_key = k
-                                break
-                        if uid_key:
-                            break
-                    if not uid_key:
-                        for item in data[:100]:
+                    # Кандидати ключів для пошуку ідентифікатора предмета
+                    key_candidates = ["UniqueName", "@uniquename", "ItemId", "item_id"]
+                    best_key = None
+                    best_count = 0
+                    # Аналізуємо перші 100 записів, щоб знайти найкраще поле
+                    sample = data[:100]
+                    for key in key_candidates:
+                        count = 0
+                        for item in sample:
+                            val = item.get(key)
+                            if isinstance(val, str) and val.startswith(("T4_","T5_","T6_","T7_","T8_")):
+                                count += 1
+                        if count > best_count:
+                            best_count = count
+                            best_key = key
+                    # Якщо жоден кандидат не підійшов, шукаємо будь-яке поле з префіксом T4_
+                    if not best_key:
+                        for item in sample:
                             for k, v in item.items():
                                 if isinstance(v, str) and v.startswith(("T4_","T5_","T6_","T7_","T8_")):
-                                    uid_key = k
+                                    best_key = k
                                     break
-                            if uid_key:
+                            if best_key:
                                 break
-                    if not uid_key:
-                        logger.error("Не вдалося знайти поле з назвою предмета (T4_..T8_)")
+                    if not best_key:
+                        logger.error("Не вдалося знайти поле з ідентифікатором предмета (T4_..T8_)")
                         items_data = {}
                         is_db_ready = False
                         return
-                    logger.info(f"Використовується ключ: {uid_key}")
+                    logger.info(f"Використовується ключ: {best_key} (знайдено {best_count} збігів у вибірці)")
 
                     items_data = {}
                     for i in data:
-                        uid = i.get(uid_key)
+                        uid = i.get(best_key)
                         if not uid or not isinstance(uid, str):
                             continue
                         if not uid.startswith(("T4_","T5_","T6_","T7_","T8_")):
                             continue
                         if is_blacklisted(uid):
                             continue
-                        # Прибрали перевірку на ключові слова, тепер беремо всі T4_-T8_ крім чорного списку
                         items_data[uid] = i
 
                     is_db_ready = True
