@@ -211,43 +211,26 @@ async def download_items():
                         continue
                     logger.info(f"Отримано {len(data)} записів з GitHub")
 
-                    # Діагностика першого елементу
-                    if data:
-                        logger.info(f"ТИП data[0]: {type(data[0])}")
-                        logger.info(f"ПЕРШИЙ ЕЛЕМЕНТ JSON: {json.dumps(data[0], ensure_ascii=False)[:2000]}")
-                        logger.info(f"КЛЮЧІ ПЕРШОГО ЕЛЕМЕНТУ: {list(data[0].keys())}")
-
                     new_items = {}
-                    sample_logged = 0
                     for i in data:
-                        # Надійне витягування uid: рядок або словник із ключем "value"
-                        raw = i.get("UniqueName") or i.get("@uniquename")
-                        if raw is None:
+                        raw_uid = i.get("UniqueName") or i.get("@uniquename")
+                        if not raw_uid:
                             continue
-                        if isinstance(raw, str):
-                            uid = raw.strip().upper()
-                        elif isinstance(raw, dict):
-                            # Можлива структура {"value": "T4_MAIN_SWORD"}
-                            uid = str(raw.get("value", "")).strip().upper()
-                        else:
-                            uid = str(raw).strip().upper()
-
-                        if not uid:
+                        uid = str(raw_uid).strip().upper()
+                        if not uid.startswith("T"):
                             continue
-
-                        base_uid = uid.split("@")[0]
-                        if not re.match(r"^T[4-8]_", base_uid):
+                        if len(uid) < 2:
                             continue
-
-                        # Для відладки покажемо перші 3 знайдені ідентифікатори
-                        if sample_logged < 3:
-                            logger.info(f"Знайдено T4+ предмет: {uid}")
-                            sample_logged += 1
-
+                        tier = uid[1]
+                        if tier not in ["4", "5", "6", "7", "8"]:
+                            continue
                         if is_blacklisted(uid):
                             continue
-
                         new_items[uid] = i
+
+                    # Логування перших 20 доданих для контролю
+                    if new_items and len(new_items) < 20:
+                        logger.info(f"Перші 20 UID: {list(new_items.keys())[:20]}")
 
                     if not new_items:
                         logger.error("Не знайдено жодного предмета T4_-T8_ після фільтрації")
