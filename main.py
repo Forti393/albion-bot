@@ -57,17 +57,14 @@ last_scan_time: Dict[int, float] = {}
 CACHE_TTL = 3600
 FALLBACK_CACHE_TTL = 7200
 
-# Очищення кешів (фонове завдання)
 async def cache_cleaner():
     while not is_shutting_down:
-        await asyncio.sleep(600)  # кожні 10 хвилин
+        await asyncio.sleep(600)
         now = datetime.now(timezone.utc)
         for cache, ttl in [(history_cache, CACHE_TTL), (history_fallback_cache, FALLBACK_CACHE_TTL), (price_cache, CACHE_PRICE_TTL)]:
             expired = [k for k, v in cache.items() if (now - v.get('time', now)).total_seconds() > ttl]
             for k in expired:
                 del cache[k]
-        if expired:
-            logger.debug(f"Cache cleaner: видалено {len(expired)} записів")
 
 CITIES = ["Bridgewatch", "Martlock", "Lymhurst", "Thetford", "Fort Sterling", "Caerleon", "Brecilien", "Black Market"]
 CITY_EMOJIS = {"Lymhurst":"🟢","Martlock":"🔵","Caerleon":"🔴","Thetford":"🟣","Bridgewatch":"🟠","Fort Sterling":"⚪","Brecilien":"🌸","Black Market":"⚫"}
@@ -201,16 +198,31 @@ async def get_item_liquidity_fallback(item_id,city,quality):
     return 0,0,None
 
 async def download_items():
+    """Завантаження бази предметів із повторними спробами."""
     global items_data, is_db_ready, http_session
-    try:
-        async with http_session.get("https://raw.githubusercontent.com/ao-data/ao-bin-dumps/master/formatted/items.json",timeout=60) as r:
-            if r.status==200:
-                data=await r.json(content_type=None)
-                allowed=["weapon","armor","plate","leather","cloth","bag","cape","potion","meal","mount","tool","offhand"]
-                items_data={i["UniqueName"]:i for i in data if i.get("UniqueName","").startswith(("T4_","T5_","T6_","T7_","T8_")) and any(x in i.get("UniqueName","").lower() for x in allowed) and not is_blacklisted(i.get("UniqueName",""))}
-                is_db_ready=True
-                logger.info(f"База: {len(items_data)}")
-    except Exception as e: logger.error(f"Помилка завантаження предметів: {e}")
+    url = "https://raw.githubusercontent.com/ao-data/ao-bin-dumps/master/formatted/items.json"
+    for attempt in range(3):
+        try:
+            async with http_session.get(url, timeout=60) as r:
+                if r.status == 200:
+                    data = await r.json(content_type=None)
+                    allowed = ["weapon","armor","plate","leather","cloth","bag","cape","potion","meal","mount","tool","offhand"]
+                    items_data = {
+                        i["UniqueName"]: i
+                        for i in data
+                        if i.get("UniqueName","").startswith(("T4_","T5_","T6_","T7_","T8_"))
+                        and any(x in i.get("UniqueName","").lower() for x in allowed)
+                        and not is_blacklisted(i.get("UniqueName",""))
+                    }
+                    is_db_ready = True
+                    logger.info(f"Базу предметів завантажено: {len(items_data)} позицій")
+                    return
+                else:
+                    logger.warning(f"Спроба {attempt+1}: HTTP {r.status} при завантаженні items.json")
+        except Exception as e:
+            logger.error(f"Спроба {attempt+1}: помилка завантаження items.json: {e}")
+        await asyncio.sleep(5)  # зачекати перед повторною спробою
+    logger.critical("Не вдалося завантажити базу предметів після 3 спроб!")
 AI_ANALYSIS_PROMPT = """Ти — фінансовий аналітик ринку Albion Online. Проаналізуй наведені нижче ринкові пропозиції та вибери 15 найкращих для перепродажу.
 
 Критерії відбору:
@@ -438,7 +450,7 @@ async def disp_res(msg, res, d):
         ai_reason = r.get('ai_reason', '')
         reason_block = f"\n🧠 <i>AI: {ai_reason}</i>" if ai_reason else ""
 
-        # Виправлений блок: виносимо значення у змінні
+        # Виправлений блок із змінними
         p_p_val = r["p_p"]
         p_n_val = r["p_n"]
         profit_line = (
@@ -612,12 +624,19 @@ async def city_origin(cb, state: FSMContext):
 
 @dp.message(F.text == "🚀 Запустити сканер", StateFilter('*'))
 async def main_search(m, state: FSMContext):
+    global is_db_ready, items_data
     d = await state.get_data(); chat_id = m.chat.id
     now = time_module.time()
     if now - last_scan_time.get(chat_id, 0) < 10:
         await m.answer("⏳ Зачекайте 10 секунд."); return
     last_scan_time[chat_id] = now
-    if not is_db_ready: return await m.answer("⏳ База ще завантажується...")
+
+    # Якщо база досі не завантажилась, пробуємо ще раз
+    if not is_db_ready:
+        await m.answer("⏳ База предметів не завантажена. Пробую завантажити...")
+        await download_items()
+        if not is_db_ready:
+            return await m.answer("❌ Не вдалося завантажити базу предметів. Спробуйте пізніше.")
 
     ai_active = d.get("ai_mode", False)
     if not ai_active:
@@ -725,7 +744,7 @@ async def main():
     if not TOKEN: return
     http_session = aiohttp.ClientSession(headers=HEADERS)
     asyncio.create_task(download_items())
-    asyncio.create_task(cache_cleaner())  # Додано очищення кешу
+    asyncio.create_task(cache_cleaner())
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
