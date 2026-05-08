@@ -213,7 +213,7 @@ async def download_items():
                     # Визначаємо правильний ключ для унікального імені
                     key_candidates = ["UniqueName", "uniquename", "@uniquename", "ItemId", "item_id"]
                     uid_key = None
-                    for item in data[:50]:  # перевіряємо перші 50 записів
+                    for item in data[:50]:
                         for k in key_candidates:
                             if k in item and isinstance(item[k], str) and item[k].startswith(("T4_","T5_","T6_","T7_","T8_")):
                                 uid_key = k
@@ -221,7 +221,6 @@ async def download_items():
                         if uid_key:
                             break
                     if not uid_key:
-                        # Якщо не знайшли — спробуємо взяти будь-який ключ, що починається з T4_
                         for item in data[:100]:
                             for k, v in item.items():
                                 if isinstance(v, str) and v.startswith(("T4_","T5_","T6_","T7_","T8_")):
@@ -236,7 +235,6 @@ async def download_items():
                         return
                     logger.info(f"Використовується ключ: {uid_key}")
 
-                    allowed = ["weapon","armor","plate","leather","cloth","bag","cape","potion","meal","mount","tool","offhand"]
                     items_data = {}
                     for i in data:
                         uid = i.get(uid_key)
@@ -244,11 +242,11 @@ async def download_items():
                             continue
                         if not uid.startswith(("T4_","T5_","T6_","T7_","T8_")):
                             continue
-                        if not any(x in uid.lower() for x in allowed):
-                            continue
                         if is_blacklisted(uid):
                             continue
+                        # Прибрали перевірку на ключові слова, тепер беремо всі T4_-T8_ крім чорного списку
                         items_data[uid] = i
+
                     is_db_ready = True
                     logger.info(f"Базу предметів завантажено: {len(items_data)} позицій")
                     return
