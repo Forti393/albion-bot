@@ -33,10 +33,9 @@ if genai and GEMINI_API_KEY:
             if "gemini" in name.lower():
                 AVAILABLE_GEMINI_MODELS.append(name)
         if not AVAILABLE_GEMINI_MODELS:
-            logger.warning("Не знайдено моделей Gemini. AI вимкнено.")
             gemini_client = None
     except Exception as e:
-        logger.error(f"Помилка ініціалізації Gemini: {e}")
+        logger.error(f"Помилка Gemini: {e}")
         gemini_client = None
 
 bot = Bot(token=TOKEN) if TOKEN else None
@@ -210,49 +209,36 @@ async def download_items():
                         continue
                     logger.info(f"Отримано {len(data)} записів з GitHub")
 
-                    # Кандидати ключів для пошуку ідентифікатора предмета
-                    key_candidates = ["UniqueName", "@uniquename", "ItemId", "item_id"]
-                    best_key = None
-                    best_count = 0
-                    sample = data[:100]
-                    for key in key_candidates:
-                        count = 0
-                        for item in sample:
-                            val = item.get(key)
-                            if isinstance(val, str) and val.startswith(("T4_","T5_","T6_","T7_","T8_")):
-                                count += 1
-                        if count > best_count:
-                            best_count = count
-                            best_key = key
-                    if not best_key:
-                        for item in sample:
-                            for k, v in item.items():
-                                if isinstance(v, str) and v.startswith(("T4_","T5_","T6_","T7_","T8_")):
-                                    best_key = k
-                                    break
-                            if best_key:
-                                break
-                    if not best_key:
-                        logger.error("Не вдалося знайти поле з ідентифікатором предмета (T4_..T8_)")
+                    # Збираємо всі потенційні ключі з перших 1000 записів і оцінюємо, який з них найчастіше містить T4_-T8_
+                    key_counts = {}
+                    sample = data[:1000]
+                    for item in sample:
+                        for k, v in item.items():
+                            if isinstance(v, str) and re.match(r"^T[4-8]_", v):
+                                key_counts[k] = key_counts.get(k, 0) + 1
+
+                    if not key_counts:
+                        logger.error("Не знайдено жодного ключа з T4_-T8_ префіксом")
                         items_data = {}
                         is_db_ready = False
                         return
-                    logger.info(f"Використовується ключ: {best_key} (знайдено {best_count} збігів у вибірці)")
 
-                    # ФОРМУВАННЯ БАЗИ (ВИПРАВЛЕНО)
+                    best_key = max(key_counts, key=key_counts.get)
+                    logger.info(f"Використовується ключ: {best_key} (T4-T8 збігів у вибірці: {key_counts[best_key]})")
+
                     new_items = {}
                     for i in data:
                         uid = i.get(best_key)
-                        if not uid or not isinstance(uid, str):
+                        if not isinstance(uid, str):
                             continue
-                        if not uid.startswith(("T4_","T5_","T6_","T7_","T8_")):
+                        if not re.match(r"^T[4-8]_", uid):
                             continue
                         if is_blacklisted(uid):
                             continue
                         new_items[uid] = i
 
                     if not new_items:
-                        logger.error("Не знайдено жодного предмета T4_-T8_ після фільтрації!")
+                        logger.error("Після фільтрації не залишилось предметів")
                         items_data = {}
                         is_db_ready = False
                         return
@@ -262,12 +248,11 @@ async def download_items():
                     logger.info(f"Базу предметів завантажено: {len(items_data)} позицій")
                     return
                 else:
-                    logger.warning(f"Спроба {attempt+1}: HTTP {r.status} при завантаженні items.json")
+                    logger.warning(f"Спроба {attempt+1}: HTTP {r.status}")
         except Exception as e:
-            logger.error(f"Спроба {attempt+1}: помилка завантаження items.json: {e}")
+            logger.error(f"Спроба {attempt+1}: помилка: {e}")
         await asyncio.sleep(5)
-    logger.critical("Не вдалося завантажити базу предметів після 3 спроб!")
-# Частина 2 (AI, сканер, відображення)
+    logger.critical("Не вдалося завантажити базу після 3 спроб")
 AI_ANALYSIS_PROMPT = """Ти — фінансовий аналітик ринку Albion Online. Проаналізуй наведені нижче ринкові пропозиції та вибери 15 найкращих для перепродажу.
 
 Критерії відбору:
@@ -524,7 +509,6 @@ async def disp_res(msg, res, d):
     for t in messages:
         await msg.answer(t, parse_mode=ParseMode.HTML)
     await msg.answer(f"📊 Усього знайдено <b>{len(res)}</b> позицій.", parse_mode=ParseMode.HTML)
-# Частина 3 (клавіатура, обробники, main)
 def get_main_kb(d):
     mode = d.get("mode")
     budget = d.get("buy_limit", 0)
