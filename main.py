@@ -210,7 +210,7 @@ async def download_items():
                         continue
                     logger.info(f"Отримано {len(data)} записів з GitHub")
 
-                    # Кандидати ключів для пошуку ідентифікатора предмета
+                    # Визначення ключа UID
                     key_candidates = ["UniqueName", "@uniquename", "ItemId", "item_id"]
                     best_key = None
                     best_count = 0
@@ -218,18 +218,20 @@ async def download_items():
                     for key in key_candidates:
                         count = 0
                         for item in sample:
-                            val = item.get(key)
-                            if isinstance(val, str) and val.startswith(("T4_","T5_","T6_","T7_","T8_")):
-                                count += 1
+                            if isinstance(item, dict):
+                                val = item.get(key)
+                                if isinstance(val, str) and val.startswith(("T4_","T5_","T6_","T7_","T8_")):
+                                    count += 1
                         if count > best_count:
                             best_count = count
                             best_key = key
                     if not best_key:
                         for item in sample:
-                            for k, v in item.items():
-                                if isinstance(v, str) and v.startswith(("T4_","T5_","T6_","T7_","T8_")):
-                                    best_key = k
-                                    break
+                            if isinstance(item, dict):
+                                for k, v in item.items():
+                                    if isinstance(v, str) and v.startswith(("T4_","T5_","T6_","T7_","T8_")):
+                                        best_key = k
+                                        break
                             if best_key:
                                 break
                     if not best_key:
@@ -239,25 +241,37 @@ async def download_items():
                         return
                     logger.info(f"Використовується ключ: {best_key} (знайдено {best_count} збігів у вибірці)")
 
-                    # ЛОГУВАННЯ РЕАЛЬНИХ ЗНАЧЕНЬ для діагностики
-                    sample_uids = []
-                    for i in data[:100]:
-                        uid = i.get(best_key)
-                        if uid:
-                            sample_uids.append(str(uid)[:100])
-                    logger.info(f"Приклади uid (перші 15): {sample_uids[:15]}")
-
+                    # Статистика відсіву
+                    total = len(data)
+                    no_uid = 0
+                    not_str = 0
+                    wrong_tier = 0
+                    blacklisted = 0
+                    added = 0
                     items_data = {}
-                    for i in data:
-                        uid = i.get(best_key)
-                        if not uid or not isinstance(uid, str):
+                    for item in data:
+                        if not isinstance(item, dict):
+                            continue
+                        uid = item.get(best_key)
+                        if not uid:
+                            no_uid += 1
+                            continue
+                        if not isinstance(uid, str):
+                            not_str += 1
                             continue
                         if not uid.startswith(("T4_","T5_","T6_","T7_","T8_")):
+                            wrong_tier += 1
                             continue
                         if is_blacklisted(uid):
+                            blacklisted += 1
                             continue
-                        items_data[uid] = i
+                        items_data[uid] = item
+                        added += 1
 
+                    logger.info(
+                        f"Фільтрація: всього={total}, без uid={no_uid}, не рядок={not_str}, "
+                        f"не T4-T8={wrong_tier}, чорний список={blacklisted}, додано={added}"
+                    )
                     is_db_ready = True
                     logger.info(f"Базу предметів завантажено: {len(items_data)} позицій")
                     return
@@ -675,7 +689,6 @@ async def main_search(m, state: FSMContext):
         await m.answer("⏳ Зачекайте 10 секунд."); return
     last_scan_time[chat_id] = now
 
-    # Якщо база досі не завантажилась, пробуємо ще раз
     if not is_db_ready:
         await m.answer("⏳ База предметів не завантажена. Пробую завантажити...")
         await download_items()
