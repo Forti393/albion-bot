@@ -57,13 +57,16 @@ CACHE_TTL = 3600
 FALLBACK_CACHE_TTL = 7200
 
 async def cache_cleaner():
+    """Безпечне очищення кешів, price_cache очищається окремо."""
     while not is_shutting_down:
         await asyncio.sleep(600)
         now = datetime.now(timezone.utc)
-        for cache, ttl in [(history_cache, CACHE_TTL), (history_fallback_cache, FALLBACK_CACHE_TTL), (price_cache, CACHE_PRICE_TTL)]:
+        for cache, ttl in [(history_cache, CACHE_TTL), (history_fallback_cache, FALLBACK_CACHE_TTL)]:
             expired = [k for k, v in cache.items() if (now - v.get('time', now)).total_seconds() > ttl]
             for k in expired:
                 del cache[k]
+        if price_cache and (time_module.time() - price_cache.get('time', 0)) > CACHE_PRICE_TTL:
+            price_cache.clear()
 
 CITIES = ["Bridgewatch", "Martlock", "Lymhurst", "Thetford", "Fort Sterling", "Caerleon", "Brecilien", "Black Market"]
 CITY_EMOJIS = {"Lymhurst":"🟢","Martlock":"🔵","Caerleon":"🔴","Thetford":"🟣","Bridgewatch":"🟠","Fort Sterling":"⚪","Brecilien":"🌸","Black Market":"⚫"}
@@ -197,7 +200,7 @@ async def get_item_liquidity_fallback(item_id,city,quality):
     return 0,0,None
 
 async def download_items():
-    """Завантажує базу, знаходячи T4_-T8_ в БУДЬ-ЯКОМУ полі кожного запису."""
+    """Завантажує базу, використовуючи ключі UniqueName або @uniquename."""
     global items_data, is_db_ready, http_session
     url = "https://raw.githubusercontent.com/ao-data/ao-bin-dumps/master/formatted/items.json"
     for attempt in range(3):
@@ -212,13 +215,10 @@ async def download_items():
 
                     new_items = {}
                     for i in data:
-                        uid = None
-                        # Шукаємо перше поле, значення якого починається з T4_..T8_
-                        for k, v in i.items():
-                            if isinstance(v, str) and re.match(r"^T[4-8]_", v):
-                                uid = v
-                                break
-                        if not uid:
+                        uid = i.get("UniqueName") or i.get("@uniquename")
+                        if not uid or not isinstance(uid, str):
+                            continue
+                        if not uid.startswith(("T4_","T5_","T6_","T7_","T8_")):
                             continue
                         if is_blacklisted(uid):
                             continue
