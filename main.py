@@ -197,6 +197,7 @@ async def get_item_liquidity_fallback(item_id,city,quality):
     return 0,0,None
 
 async def download_items():
+    """Завантажує базу, знаходячи T4_-T8_ в БУДЬ-ЯКОМУ полі кожного запису."""
     global items_data, is_db_ready, http_session
     url = "https://raw.githubusercontent.com/ao-data/ao-bin-dumps/master/formatted/items.json"
     for attempt in range(3):
@@ -209,36 +210,22 @@ async def download_items():
                         continue
                     logger.info(f"Отримано {len(data)} записів з GitHub")
 
-                    # Збираємо всі потенційні ключі з перших 1000 записів і оцінюємо, який з них найчастіше містить T4_-T8_
-                    key_counts = {}
-                    sample = data[:1000]
-                    for item in sample:
-                        for k, v in item.items():
-                            if isinstance(v, str) and re.match(r"^T[4-8]_", v):
-                                key_counts[k] = key_counts.get(k, 0) + 1
-
-                    if not key_counts:
-                        logger.error("Не знайдено жодного ключа з T4_-T8_ префіксом")
-                        items_data = {}
-                        is_db_ready = False
-                        return
-
-                    best_key = max(key_counts, key=key_counts.get)
-                    logger.info(f"Використовується ключ: {best_key} (T4-T8 збігів у вибірці: {key_counts[best_key]})")
-
                     new_items = {}
                     for i in data:
-                        uid = i.get(best_key)
-                        if not isinstance(uid, str):
-                            continue
-                        if not re.match(r"^T[4-8]_", uid):
+                        uid = None
+                        # Шукаємо перше поле, значення якого починається з T4_..T8_
+                        for k, v in i.items():
+                            if isinstance(v, str) and re.match(r"^T[4-8]_", v):
+                                uid = v
+                                break
+                        if not uid:
                             continue
                         if is_blacklisted(uid):
                             continue
                         new_items[uid] = i
 
                     if not new_items:
-                        logger.error("Після фільтрації не залишилось предметів")
+                        logger.error("Не знайдено жодного предмета T4_-T8_")
                         items_data = {}
                         is_db_ready = False
                         return
