@@ -211,24 +211,23 @@ async def download_items():
                         continue
                     logger.info(f"Отримано {len(data)} записів з GitHub")
 
+                    # ДОДАТИ ДІАГНОСТИКУ – ПОКАЗАТИ ПЕРШИЙ ЕЛЕМЕНТ
+                    if data:
+                        logger.info(f"ТИП data[0]: {type(data[0])}")
+                        logger.info(f"ПЕРШИЙ ЕЛЕМЕНТ JSON: {json.dumps(data[0], ensure_ascii=False)[:2000]}")
+                        logger.info(f"КЛЮЧІ ПЕРШОГО ЕЛЕМЕНТУ: {list(data[0].keys())}")
+
                     new_items = {}
                     for i in data:
-                        # Беремо UniqueName або @uniquename, чистимо, верхній регістр
                         raw_uid = i.get("UniqueName") or i.get("@uniquename") or ""
                         uid = str(raw_uid).strip().upper()
                         if not uid:
                             continue
-
-                        # Відкидаємо частину після @ (наприклад, T4_MAIN_SWORD@1 стає T4_MAIN_SWORD)
                         base_uid = uid.split("@")[0]
-
-                        # Перевіряємо, чи починається з T4_..T8_
                         if not re.match(r"^T[4-8]_", base_uid):
                             continue
-
                         if is_blacklisted(uid):
                             continue
-
                         new_items[uid] = i
 
                     if not new_items:
