@@ -57,7 +57,6 @@ CACHE_TTL = 3600
 FALLBACK_CACHE_TTL = 7200
 
 async def cache_cleaner():
-    """Безпечне очищення кешів, price_cache очищається окремо."""
     while not is_shutting_down:
         await asyncio.sleep(600)
         now = datetime.now(timezone.utc)
@@ -200,7 +199,6 @@ async def get_item_liquidity_fallback(item_id,city,quality):
     return 0,0,None
 
 async def download_items():
-    """Завантажує базу, використовуючи ключі UniqueName або @uniquename."""
     global items_data, is_db_ready, http_session
     url = "https://raw.githubusercontent.com/ao-data/ao-bin-dumps/master/formatted/items.json"
     for attempt in range(3):
@@ -215,17 +213,26 @@ async def download_items():
 
                     new_items = {}
                     for i in data:
-                        uid = i.get("UniqueName") or i.get("@uniquename")
-                        if not uid or not isinstance(uid, str):
+                        # Беремо UniqueName або @uniquename, чистимо, верхній регістр
+                        raw_uid = i.get("UniqueName") or i.get("@uniquename") or ""
+                        uid = str(raw_uid).strip().upper()
+                        if not uid:
                             continue
-                        if not uid.startswith(("T4_","T5_","T6_","T7_","T8_")):
+
+                        # Відкидаємо частину після @ (наприклад, T4_MAIN_SWORD@1 стає T4_MAIN_SWORD)
+                        base_uid = uid.split("@")[0]
+
+                        # Перевіряємо, чи починається з T4_..T8_
+                        if not re.match(r"^T[4-8]_", base_uid):
                             continue
+
                         if is_blacklisted(uid):
                             continue
+
                         new_items[uid] = i
 
                     if not new_items:
-                        logger.error("Не знайдено жодного предмета T4_-T8_")
+                        logger.error("Не знайдено жодного предмета T4_-T8_ після фільтрації")
                         items_data = {}
                         is_db_ready = False
                         return
