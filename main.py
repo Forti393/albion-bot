@@ -72,7 +72,8 @@ QUALITY_NAMES = {1:"Обычное", 2:"Хорошее", 3:"Выдающееся
 TRASH = ["Знаток ","Мастер ","Великий мастер ","Старейшина ","Ученик ","Новичок "]
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-BLACKLIST_KEYWORDS = ["OFF_BOOK"]
+# Внутрішній чорний список (тільки відверте сміття)
+BLACKLIST_KEYWORDS = ["OFF_BOOK"]  # книги
 
 RATIO_OPTIONS = [1.5, 2.0, 2.5, 3.0]
 AVG_MULTIPLIER_OPTIONS = [1.2, 1.5, 1.8, 2.0, 2.2, 2.5, 3.0, 3.5, 4.0]
@@ -92,13 +93,11 @@ class BotState(StatesGroup):
     settings_menu = State()
 
 def is_blacklisted(unique_name):
+    """Перевіряє, чи предмет у чорному списку."""
     name = unique_name.upper()
-    env_blacklist = os.environ.get("BLACKLIST", "")
-    for w in env_blacklist.split(","):
-        if w.strip().upper() in name:
-            return True
     for w in BLACKLIST_KEYWORDS:
-        if w in name:
+        # Перевірка w потрібна, щоб порожній рядок не матчив усе підряд
+        if w and w in name:
             return True
     return False
 
@@ -241,37 +240,19 @@ async def download_items():
                         return
                     logger.info(f"Використовується ключ: {best_key} (знайдено {best_count} збігів у вибірці)")
 
-                    # Статистика відсіву
-                    total = len(data)
-                    no_uid = 0
-                    not_str = 0
-                    wrong_tier = 0
-                    blacklisted = 0
-                    added = 0
                     items_data = {}
                     for item in data:
                         if not isinstance(item, dict):
                             continue
                         uid = item.get(best_key)
-                        if not uid:
-                            no_uid += 1
-                            continue
-                        if not isinstance(uid, str):
-                            not_str += 1
+                        if not uid or not isinstance(uid, str):
                             continue
                         if not uid.startswith(("T4_","T5_","T6_","T7_","T8_")):
-                            wrong_tier += 1
                             continue
                         if is_blacklisted(uid):
-                            blacklisted += 1
                             continue
                         items_data[uid] = item
-                        added += 1
 
-                    logger.info(
-                        f"Фільтрація: всього={total}, без uid={no_uid}, не рядок={not_str}, "
-                        f"не T4-T8={wrong_tier}, чорний список={blacklisted}, додано={added}"
-                    )
                     is_db_ready = True
                     logger.info(f"Базу предметів завантажено: {len(items_data)} позицій")
                     return
