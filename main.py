@@ -211,23 +211,42 @@ async def download_items():
                         continue
                     logger.info(f"Отримано {len(data)} записів з GitHub")
 
-                    # ДОДАТИ ДІАГНОСТИКУ – ПОКАЗАТИ ПЕРШИЙ ЕЛЕМЕНТ
+                    # Діагностика першого елементу
                     if data:
                         logger.info(f"ТИП data[0]: {type(data[0])}")
                         logger.info(f"ПЕРШИЙ ЕЛЕМЕНТ JSON: {json.dumps(data[0], ensure_ascii=False)[:2000]}")
                         logger.info(f"КЛЮЧІ ПЕРШОГО ЕЛЕМЕНТУ: {list(data[0].keys())}")
 
                     new_items = {}
+                    sample_logged = 0
                     for i in data:
-                        raw_uid = i.get("UniqueName") or i.get("@uniquename") or ""
-                        uid = str(raw_uid).strip().upper()
+                        # Надійне витягування uid: рядок або словник із ключем "value"
+                        raw = i.get("UniqueName") or i.get("@uniquename")
+                        if raw is None:
+                            continue
+                        if isinstance(raw, str):
+                            uid = raw.strip().upper()
+                        elif isinstance(raw, dict):
+                            # Можлива структура {"value": "T4_MAIN_SWORD"}
+                            uid = str(raw.get("value", "")).strip().upper()
+                        else:
+                            uid = str(raw).strip().upper()
+
                         if not uid:
                             continue
+
                         base_uid = uid.split("@")[0]
                         if not re.match(r"^T[4-8]_", base_uid):
                             continue
+
+                        # Для відладки покажемо перші 3 знайдені ідентифікатори
+                        if sample_logged < 3:
+                            logger.info(f"Знайдено T4+ предмет: {uid}")
+                            sample_logged += 1
+
                         if is_blacklisted(uid):
                             continue
+
                         new_items[uid] = i
 
                     if not new_items:
