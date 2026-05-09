@@ -317,7 +317,7 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
     pre_res = []; b_l = d.get("buy_limit", 0); p_l = d.get("profit_limit", 4000)
     ext = d.get("extra", False); check_liq = d.get("check_liq", False)
     max_ratio = float(d.get("max_ratio", 2.0)); max_avg_mult = float(d.get("max_avg_mult", 4.0))
-    allow_zero_avg = d.get("allow_zero_avg", False)   # НОВЕ
+    allow_zero_avg = d.get("allow_zero_avg", False)
     MAX_AGE_MINUTES = 300
 
     i_list = list(items_data.keys())
@@ -369,8 +369,7 @@ async def scan_logic(d, f_c=None, t_c=None, ai_mode=False):
         for item in pre_res[:200]:
             vol, avg_p, period = await get_item_liquidity_fallback(item['id'], item['to'], item['q'])
             if avg_p == 0:
-                if not allow_zero_avg: continue   # не показуємо без дозволу
-                # антифейк не перевіряємо для невідомої середньої
+                if not allow_zero_avg: continue
             else:
                 if item['sell'] > (avg_p * max_avg_mult): continue
             item['vol'] = vol; item['avg_p'] = avg_p; item['price_period'] = period
@@ -530,8 +529,9 @@ async def set_avg_mult(m, state: FSMContext):
             await m.answer(f"Антифейк: ×{a}.", reply_markup=get_settings_kb(await state.get_data()))
     except: pass
 
-@dp.message(F.text == "🗺 Режим", StateFilter('*'))
+@dp.message(F.text.startswith("Режим:") | (F.text == "🗺 Режим"), StateFilter('*'))
 async def choose_mode(m, state: FSMContext):
+    await state.set_state(None)  # гарантовано скидаємо будь-який стан
     await m.answer("Оберіть режим:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎲 Всі міста", callback_data="mode_all")],
         [InlineKeyboardButton(text="📍 Шлях", callback_data="mode_custom")],
@@ -543,17 +543,20 @@ async def set_mode_cb(cb, state: FSMContext):
     m_type = cb.data.split("_")[1]
     if m_type == "all":
         await state.update_data(mode="all", f_c=None, t_c=None); await cb.message.edit_text("🌍 Всі міста!")
-        await cb.message.answer("Оновлено", reply_markup=get_main_kb(await state.get_data()))
     elif m_type == "custom":
         await state.set_state(BotState.picking_from)
         await cb.message.edit_text("Звідки:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"{CITY_EMOJIS[c]} {c}", callback_data=f"city_from_{c}")] for c in CITIES if c!="Black Market"
         ]))
+        return await cb.answer()
     else:
         await state.set_state(BotState.picking_origin)
         await cb.message.edit_text("Оберіть місто:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"{CITY_EMOJIS[c]} {c}", callback_data=f"origin_{c}")] for c in CITIES if c!="Black Market"
         ]))
+        return await cb.answer()
+    await cb.message.answer("Оновлено", reply_markup=get_main_kb(await state.get_data()))
+    await cb.answer()
 
 @dp.callback_query(F.data.startswith("city_from_"))
 async def city_from(cb, state: FSMContext):
